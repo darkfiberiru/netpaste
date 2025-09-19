@@ -1,0 +1,80 @@
+# np - Send piped input to NetPaste (most common use case)
+np() { if [ -t 0 ]; then echo "Error: np requires piped input"; echo "Usage: echo 'text' | np"; echo "       cat file.txt | np"; echo "       ps aux | np"; return 1; fi; python3 ~/bin/netpaste.py -s; }
+
+# npf - Send file contents to NetPaste
+npf() { if [ $# -eq 0 ]; then echo "Usage: npf <filename>"; echo "Send file contents to NetPaste clipboard"; return 1; fi; local file="$1"; if [ ! -f "$file" ]; then echo "Error: File '$file' not found"; return 1; fi; cat "$file" | python3 ~/bin/netpaste.py; }
+
+# npd - Send current directory to NetPaste file explorer
+npd() { local dir="${1:-.}"; python3 ~/bin/netpaste.py -e "$dir"; }
+
+# npt - Send tmux buffer to NetPaste
+npt() {
+  if [ -z "$TMUX" ]; then
+    echo "Error: You must be in a tmux session to use npt." >&2
+    return 1
+  fi
+  python3 ~/bin/netpaste.py --tmux-send
+}
+
+# nptget - Get tmux buffer contents to stdout (for piping or inspection)
+nptget() {
+  if [ -z "$TMUX" ]; then
+    echo "Error: You must be in a tmux session to use nptget." >&2
+    return 1
+  fi
+  tmux save-buffer -
+}
+
+# npr - Restart NetPaste server
+npr() { python3 ~/bin/netpaste.py -r; }
+
+# npls - Send ls output to NetPaste
+npls() { local dir="${1:-.}"; ls -la "$dir" | python3 ~/bin/netpaste.py -s; }
+
+# npgit - Send git status/diff to NetPaste
+npgit() { local cmd="${1:-status}"; case "$cmd" in status|st) git status | python3 ~/bin/netpaste.py -s ;; diff|d) git diff | python3 ~/bin/netpaste.py -s ;; log|l) git log --oneline -10 | python3 ~/bin/netpaste.py -s ;; *) echo "Usage: npgit [status|diff|log]"; return 1 ;; esac; }
+
+# nppath - Send current path to NetPaste
+nppath() { pwd | python3 ~/bin/netpaste.py -s; }
+
+# npo - Open file with default Windows application
+npo() { if [ $# -eq 0 ]; then echo "Usage: npo <filename>"; echo "Open file with default Windows application"; return 1; fi; local file="$1"; if [ ! -f "$file" ]; then echo "Error: File '$file' not found"; return 1; fi; python3 ~/bin/netpaste.py -o "$file"; }
+
+# npcode - Open file or folder in VS Code
+npcode() { if [ $# -eq 0 ]; then echo "Usage: npcode <file or folder>"; echo "Open file or folder in VS Code on Windows"; return 1; fi; python3 ~/bin/netpaste.py --vscode "$1"; }
+
+# npurl - Open URL in default Windows browser
+npurl() { if [ $# -eq 0 ]; then echo "Usage: npurl <url>"; echo "Open URL in default Windows browser"; return 1; fi; python3 ~/bin/netpaste.py -u "$1"; }
+
+# npnotify - Send notification to Windows
+npnotify() { if [ $# -eq 0 ]; then echo "Usage: npnotify <message>"; echo "Send notification message to Windows"; return 1; fi; python3 ~/bin/netpaste.py -n "$*"; }
+
+# nph - Display help for all NetPaste functions
+nph() {
+  cat <<'EOF'
+NetPaste Helper Functions (nph) - Help
+
+Usage: <command> [arguments]
+
+Clipboard Commands:
+  np                  - Send piped input to clipboard (e.g., cat file | np)
+  npf <filename>      - Send file contents to clipboard
+  npt                 - Send the latest tmux copy buffer to clipboard
+  nptget              - Output tmux buffer to stdout (for piping/inspection)
+  npls [directory]    - Send 'ls -la' output to clipboard
+  npgit [cmd]         - Send git output (status, diff, log) to clipboard
+  nppath              - Send current working directory path to clipboard
+
+File & Directory Commands:
+  npd [directory]     - Open file explorer in the specified/current directory
+  npo <filename>      - Open a file with its default application on the remote host
+  npcode <path>       - Open file or folder in VS Code on the remote host
+
+Remote Action Commands:
+  npurl <url>         - Open a URL in the default browser on the remote host
+  npnotify <message>  - Send a desktop notification to the remote host
+
+Server Management:
+  npr                 - Restart the NetPaste server
+EOF
+}

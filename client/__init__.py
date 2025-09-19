@@ -1,0 +1,1 @@
+"""NetPaste client package"""

@@ -1,0 +1,23 @@
+[project]
+name = "netpaste-mcp"
+version = "1.0.0"
+description = "NetPaste MCP Server - Send data to Windows clipboard from Linux/WSL"
+requires-python = ">=3.8"
+dependencies = [
+    "mcp[cli]>=1.13.0",
+    "cryptography>=45.0.0",
+]
+
+[project.scripts]
+netpaste = "client.netpaste:main"
+netpaste-mcp = "client.netpaste:run_mcp_server"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["client*"]
+
+[tool.setuptools.package-data]
+client = ["*.py"]
