@@ -2,9 +2,9 @@
 name = "netpaste-mcp"
 version = "1.0.0"
 description = "NetPaste MCP Server - Send data to Windows clipboard from Linux/WSL"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = [
-    "mcp[cli]>=1.13.0",
+    "mcp[cli]>=2.3.0,<3",
     "cryptography>=45.0.0",
 ]
 

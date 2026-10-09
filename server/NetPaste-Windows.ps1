@@ -23,34 +23,16 @@ param(
 $script:StartTime = Get-Date
 Write-Host "[$(Get-Date -Format 'HH:mm:ss.fff')] NetPaste starting up..." -ForegroundColor Green
 
-# Shared secret file path (Windows AppData)
-$script:SecretFilePath = Join-Path $env:APPDATA "NetPaste\secret.key"
+# Pairing storage (Windows AppData). One secret per paired client, keyed by client_id.
+# Format: {"server_id": "...", "clients": [{"client_id", "secret" (hex), "paired", "ip"}]}
+$script:PairingsFilePath = Join-Path $env:APPDATA "NetPaste\pairings.json"
+# Pre-v2 single shared secret; no longer accepted, removed when pairings are cleared
+$script:LegacySecretFilePath = Join-Path $env:APPDATA "NetPaste\secret.key"
 
-function Get-StoredSecret {
-    if (Test-Path $script:SecretFilePath) {
-        $secret = Get-Content $script:SecretFilePath -Raw
-        if ($secret) {
-            Write-Host "Loaded shared secret from $($script:SecretFilePath)" -ForegroundColor Green
-            return $secret.Trim()
-        }
-    }
-    return $null
-}
+function Protect-OwnerOnly {
+    param([string]$Path)
 
-function Store-SharedSecret {
-    param([string]$Secret)
-    
-    # Create directory if it doesn't exist
-    $secretDir = Split-Path $script:SecretFilePath -Parent
-    if (-not (Test-Path $secretDir)) {
-        New-Item -ItemType Directory -Path $secretDir -Force | Out-Null
-    }
-    
-    # Store the secret
-    $Secret | Out-File -FilePath $script:SecretFilePath -Encoding UTF8 -NoNewline
-    
-    # Set restrictive permissions (owner only)
-    $acl = Get-Acl $script:SecretFilePath
+    $acl = Get-Acl $Path
     $acl.SetAccessRuleProtection($true, $false)
     $permission = New-Object System.Security.AccessControl.FileSystemAccessRule(
         [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
@@ -58,20 +40,127 @@ function Store-SharedSecret {
         "Allow"
     )
     $acl.SetAccessRule($permission)
-    Set-Acl $script:SecretFilePath $acl
-    
-    Write-Host "Stored shared secret to $($script:SecretFilePath)" -ForegroundColor Green
+    Set-Acl $Path $acl
 }
 
-function Clear-SharedSecret {
-    if (Test-Path $script:SecretFilePath) {
-        Remove-Item $script:SecretFilePath -Force
-        Write-Host "Cleared shared secret from $($script:SecretFilePath)" -ForegroundColor Yellow
-        return $true
-    } else {
-        Write-Host "No shared secret found at $($script:SecretFilePath)" -ForegroundColor Yellow
-        return $false
+function ConvertTo-HexString {
+    param([byte[]]$Bytes)
+    return ([System.BitConverter]::ToString($Bytes) -replace '-', '').ToLowerInvariant()
+}
+
+function ConvertFrom-HexString {
+    param([string]$Hex)
+    $bytes = New-Object byte[] ($Hex.Length / 2)
+    for ($i = 0; $i -lt $bytes.Length; $i++) {
+        $bytes[$i] = [System.Convert]::ToByte($Hex.Substring($i * 2, 2), 16)
     }
+    return ,$bytes
+}
+
+function Get-RandomHex {
+    param([int]$ByteCount)
+    $bytes = New-Object byte[] $ByteCount
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($bytes)
+    $rng.Dispose()
+    return ConvertTo-HexString -Bytes $bytes
+}
+
+function Write-Pairings {
+    param([hashtable]$Pairings)
+
+    $dir = Split-Path $script:PairingsFilePath -Parent
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    # Restrict the file before any secret is written to it
+    if (-not (Test-Path $script:PairingsFilePath)) {
+        New-Item -ItemType File -Path $script:PairingsFilePath -Force | Out-Null
+        Protect-OwnerOnly -Path $script:PairingsFilePath
+    }
+
+    $json = ConvertTo-Json -InputObject @{
+        server_id = $Pairings.server_id
+        clients = @($Pairings.clients)
+    } -Depth 4
+    Set-Content -Path $script:PairingsFilePath -Value $json -Encoding UTF8
+}
+
+function Read-Pairings {
+    $serverId = $null
+    $clients = New-Object System.Collections.ArrayList
+
+    # A read or parse error throws: regenerating here would silently drop every pairing
+    if (Test-Path $script:PairingsFilePath) {
+        $raw = Get-Content $script:PairingsFilePath -Raw
+        if ($raw -and $raw.Trim()) {
+            $data = $raw | ConvertFrom-Json
+            $serverId = $data.server_id
+            foreach ($c in @($data.clients)) {
+                if ($c -and $c.client_id -and $c.secret) {
+                    [void]$clients.Add(@{
+                        client_id = [string]$c.client_id
+                        secret = [string]$c.secret
+                        paired = [string]$c.paired
+                        ip = [string]$c.ip
+                    })
+                }
+            }
+        }
+    }
+
+    $pairings = @{ server_id = $serverId; clients = $clients }
+    if (-not $serverId) {
+        $pairings.server_id = "srv-" + (Get-RandomHex -ByteCount 6)
+        Write-Pairings -Pairings $pairings
+    }
+    return $pairings
+}
+
+function Get-PairedSecret {
+    param([hashtable]$Pairings, [string]$ClientId)
+
+    foreach ($c in $Pairings.clients) {
+        if ($c.client_id -eq $ClientId) {
+            return ,(ConvertFrom-HexString -Hex $c.secret)
+        }
+    }
+    return $null
+}
+
+function Set-PairedClient {
+    param([hashtable]$Pairings, [string]$ClientId, [byte[]]$Secret, [string]$RemoteEndpoint)
+
+    $remaining = New-Object System.Collections.ArrayList
+    foreach ($c in $Pairings.clients) {
+        if ($c.client_id -ne $ClientId) { [void]$remaining.Add($c) }
+    }
+    [void]$remaining.Add(@{
+        client_id = $ClientId
+        secret = ConvertTo-HexString -Bytes $Secret
+        paired = (Get-Date).ToString("o")
+        ip = $RemoteEndpoint
+    })
+    $Pairings.clients = $remaining
+    Write-Pairings -Pairings $Pairings
+    Write-Host "Stored pairing for client '$ClientId' in $($script:PairingsFilePath)" -ForegroundColor Green
+}
+
+function Clear-AllPairings {
+    $pairings = Read-Pairings
+    $count = $pairings.clients.Count
+    $pairings.clients = New-Object System.Collections.ArrayList
+    Write-Pairings -Pairings $pairings
+    if (Test-Path $script:LegacySecretFilePath) {
+        Remove-Item $script:LegacySecretFilePath -Force
+    }
+    Write-Host "Cleared $count client pairing(s)" -ForegroundColor Yellow
+    return $true
+}
+
+function Test-ClientId {
+    param([string]$ClientId)
+    return ($ClientId -cmatch '^[A-Za-z0-9._-]{1,64}$')
 }
 
 try {
@@ -124,10 +213,6 @@ function Generate-DHKeypair {
     # Compute public key: g^private mod p
     $publicKey = [System.Numerics.BigInteger]::ModPow($script:DH_G, $privateKey, $script:DH_P)
     
-    # Verify key generation
-    $verify = [System.Numerics.BigInteger]::ModPow($script:DH_G, $privateKey, $script:DH_P)
-    Write-Host "DH Debug - Key generation verify: $($script:DH_G)^$($privateKey.ToString().Substring(0, 30))... = $($publicKey.ToString().Substring(0, 30))... (verify: $($verify.ToString().Substring(0, 30))...)" -ForegroundColor Magenta
-    
     return @{
         PrivateKey = $privateKey
         PublicKey = $publicKey
@@ -142,20 +227,7 @@ function Compute-DHSharedSecret {
     )
     
     # Compute shared secret: their_public^my_private mod p
-    Write-Host "DH Debug - Computing: $($TheirPublicKey.ToString().Substring(0, 50))... ^ $($MyPrivateKey.ToString().Substring(0, 50))... mod P" -ForegroundColor Magenta
-    Write-Host "DH Debug - DH_P: $($script:DH_P.ToString().Substring(0, 50))..." -ForegroundColor Magenta
-    Write-Host "DH Debug - DH_G: $($script:DH_G)" -ForegroundColor Magenta
-    
-    # Test basic arithmetic
-    $testResult = [System.Numerics.BigInteger]::ModPow(2, 3, 7)
-    Write-Host "DH Debug - Test 2^3 mod 7 = $testResult (should be 1)" -ForegroundColor Magenta
-    
     $sharedSecret = [System.Numerics.BigInteger]::ModPow($TheirPublicKey, $MyPrivateKey, $script:DH_P)
-    
-    # Debug: show actual shared secret value
-    Write-Host "DH Debug - Shared secret decimal: $($sharedSecret.ToString().Substring(0, 50))...$($sharedSecret.ToString().Substring($sharedSecret.ToString().Length - 10))" -ForegroundColor Magenta
-    Write-Host "DH Debug - Shared secret vs Prime comparison: secret < P = $($sharedSecret -lt $script:DH_P)" -ForegroundColor Magenta
-    Write-Host "DH Debug - Prime length: $($script:DH_P.ToString().Length), Secret length: $($sharedSecret.ToString().Length)" -ForegroundColor Magenta
     
     # To create a big-endian byte array of fixed length (256 bytes) that matches Python's
     # `to_bytes()`, we perform the following steps:
@@ -176,32 +248,127 @@ function Compute-DHSharedSecret {
     # This handles the edge case where .NET adds an extra byte for signing, preventing a crash.
     $bytesToCopy = [System.Math]::Min($secretBytesRaw.Length, $correctByteLength)
     
-    Write-Host "DH Debug - Raw bytes length: $($secretBytesRaw.Length), copying: $bytesToCopy" -ForegroundColor Magenta
-    
     # Copy these bytes to the beginning of our fixed-size buffer
     [System.Array]::Copy($secretBytesRaw, 0, $secretBytes, 0, $bytesToCopy)
     
     # Reverse the entire buffer to get the final big-endian representation
     [System.Array]::Reverse($secretBytes)
-
-    Write-Host "DH Debug - Shared secret bytes length: $($secretBytes.Length)" -ForegroundColor Magenta
     
     # Now hash the raw bytes with SHA-256
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
     $hashBytes = $sha256.ComputeHash($secretBytes)
     $sha256.Dispose()
     
-    $hashHex = [System.BitConverter]::ToString($hashBytes) -replace '-', ''
-    Write-Host "DH Debug - SHA256 hash: $hashHex" -ForegroundColor Magenta
-    
     return $hashBytes
 }
 
 function Test-DHHandshakeMessage {
     param([string]$Data)
-    
-    # Check for DH handshake with more flexible matching (updated for string format)
-    return ($Data -match '^\s*\{\s*"type"\s*:\s*"dh_handshake"' -or $Data.Contains('"type": "dh_handshake"') -or $Data.Contains('"public_key_str"'))
+
+    # Check for DH handshake - require both type field and dh_handshake value
+    return ($Data -match '^\s*\{\s*"type"\s*:\s*"dh_handshake"' -or $Data.Contains('"type": "dh_handshake"'))
+}
+
+function Send-JsonLine {
+    param([System.Net.Sockets.NetworkStream]$Stream, [hashtable]$Object)
+    $json = $Object | ConvertTo-Json -Compress
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json + "`n")
+    $Stream.Write($bytes, 0, $bytes.Length)
+    $Stream.Flush()
+}
+
+function Send-EncryptedJsonLine {
+    param([System.Net.Sockets.NetworkStream]$Stream, [hashtable]$Object, [byte[]]$KeyBytes)
+    $json = $Object | ConvertTo-Json -Compress
+    $encrypted = Encrypt-DHData -Data $json -KeyBytes $KeyBytes
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($encrypted + "`n")
+    $Stream.Write($bytes, 0, $bytes.Length)
+    $Stream.Flush()
+}
+
+function Read-StreamLine {
+    param([System.Net.Sockets.NetworkStream]$Stream)
+
+    $buffer = New-Object byte[] 4096
+    $data = ""
+    $consecutiveTimeouts = 0
+    do {
+        try {
+            $bytesRead = $Stream.Read($buffer, 0, $buffer.Length)
+            if ($bytesRead -gt 0) {
+                $consecutiveTimeouts = 0
+                $data += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $bytesRead)
+                if ($data.Contains("`n")) { break }
+            }
+        }
+        catch [System.IO.IOException] {
+            $consecutiveTimeouts++
+            if ($consecutiveTimeouts -ge 2) { break }
+            $bytesRead = 1
+        }
+    } while ($bytesRead -gt 0)
+    return $data.Trim()
+}
+
+# --- Handshake key derivation (protocol v2) ---
+# Both sides must compute these byte-for-byte identically to client/netpaste.py.
+#   transcript = UTF8("netpaste-v2\n" + client_id + "\n" + server_id + "\n"
+#                     + client_public_str + "\n" + server_public_str + "\n") || dh_key
+#   pairing code   = (first 4 bytes of SHA256(UTF8("netpaste-sas") || transcript), big-endian) mod 10^6
+#   pairing secret = HMAC-SHA256(key = dh_key, UTF8("netpaste-pair") || transcript)
+#   session key    = HMAC-SHA256(key = pairing secret, UTF8("netpaste-session") || transcript)
+# dh_key is SHA256 of the 256-byte big-endian DH shared value; public keys are the
+# exact decimal strings sent on the wire.
+
+function Get-HmacSha256 {
+    param([byte[]]$Key, [byte[]]$Message)
+    $hmac = New-Object System.Security.Cryptography.HMACSHA256 -ArgumentList (,$Key)
+    $result = $hmac.ComputeHash($Message)
+    $hmac.Dispose()
+    return ,$result
+}
+
+function Join-Labeled {
+    param([string]$Label, [byte[]]$Data)
+    return ,([byte[]]([System.Text.Encoding]::UTF8.GetBytes($Label) + $Data))
+}
+
+function Get-HandshakeTranscript {
+    param([string]$ClientId, [string]$ServerId, [string]$ClientPublicStr, [string]$ServerPublicStr, [byte[]]$DHKey)
+    $header = "netpaste-v2`n$ClientId`n$ServerId`n$ClientPublicStr`n$ServerPublicStr`n"
+    return ,(Join-Labeled -Label $header -Data $DHKey)
+}
+
+function Get-PairingCode {
+    param([byte[]]$Transcript)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $hash = $sha256.ComputeHash((Join-Labeled -Label "netpaste-sas" -Data $Transcript))
+    $sha256.Dispose()
+    $n = ([uint64]$hash[0] -shl 24) -bor ([uint64]$hash[1] -shl 16) -bor ([uint64]$hash[2] -shl 8) -bor [uint64]$hash[3]
+    return ($n % 1000000).ToString("D6")
+}
+
+function Get-PairingSecret {
+    param([byte[]]$DHKey, [byte[]]$Transcript)
+    return ,(Get-HmacSha256 -Key $DHKey -Message (Join-Labeled -Label "netpaste-pair" -Data $Transcript))
+}
+
+function Get-SessionKey {
+    param([byte[]]$Secret, [byte[]]$Transcript)
+    return ,(Get-HmacSha256 -Key $Secret -Message (Join-Labeled -Label "netpaste-session" -Data $Transcript))
+}
+
+function Complete-DHSession {
+    param([hashtable]$Session, [string]$ClientPublicStr)
+
+    # Keep the exact string the client sent; it is part of the key derivation transcript
+    $clientPublicKey = [System.Numerics.BigInteger]::Parse($ClientPublicStr)
+    if ($clientPublicKey -le 1 -or $clientPublicKey -ge ($script:DH_P - 1)) {
+        throw "Invalid client public key"
+    }
+    $Session.DHKey = Compute-DHSharedSecret -TheirPublicKey $clientPublicKey -MyPrivateKey $Session.OurKeys.PrivateKey
+    $Session.Transcript = Get-HandshakeTranscript -ClientId $Session.ClientId -ServerId $Session.ServerId `
+        -ClientPublicStr $ClientPublicStr -ServerPublicStr $Session.ServerPublicStr -DHKey $Session.DHKey
 }
 
 function Handle-DHHandshake {
@@ -218,36 +385,59 @@ function Handle-DHHandshake {
         if ($clientMsg.type -ne "dh_handshake") {
             throw "Invalid handshake message type"
         }
-        
-        $clientPublicKey = [System.Numerics.BigInteger]::Parse($clientMsg.public_key_str)
+
+        if ($clientMsg.v -ne 2 -or -not (Test-ClientId -ClientId $clientMsg.client_id)) {
+            Send-JsonLine -Stream $Stream -Object @{
+                type = "error"
+                message = "Unsupported client protocol. Update netpaste.py, then pair with: nppair (netpaste.py --pair)"
+            }
+            throw "Client did not send a v2 handshake with a valid client_id"
+        }
+
+        $clientId = [string]$clientMsg.client_id
+        $isPairing = ($clientMsg.pair -eq $true)
+        if ($isPairing) {
+            # Pairing: the client commits to its public key and reveals it only after seeing ours,
+            # so a man-in-the-middle cannot search for keys that make the two pairing codes match
+            if (-not ([string]$clientMsg.commit -cmatch '^[0-9a-f]{64}$')) {
+                throw "Pairing handshake without a valid commitment"
+            }
+        }
+
+        $pairings = Read-Pairings
+        $secret = Get-PairedSecret -Pairings $pairings -ClientId $clientId
         
         # Generate our key pair
         $ourKeys = Generate-DHKeypair
         
+        $session = @{
+            ClientId = $clientId
+            IsPairing = $isPairing
+            Commit = [string]$clientMsg.commit
+            ServerId = $pairings.server_id
+            OurKeys = $ourKeys
+            ServerPublicStr = $ourKeys.PublicKey.ToString()
+            Secret = $secret
+            Pairings = $pairings
+            DHKey = $null
+            Transcript = $null
+        }
+        
         # Send our public key - use string to avoid JSON precision loss
-        $response = @{
+        Send-JsonLine -Stream $Stream -Object @{
             type = "dh_response"
-            public_key_str = $ourKeys.PublicKey.ToString()
-        } | ConvertTo-Json -Compress
+            v = 2
+            server_id = $pairings.server_id
+            public_key_str = $session.ServerPublicStr
+            paired = [bool]$secret
+        }
         
-        Write-Host "DH Debug - Sending full response JSON: $response" -ForegroundColor Magenta
+        if (-not $isPairing) {
+            Complete-DHSession -Session $session -ClientPublicStr ([string]$clientMsg.public_key_str)
+        }
         
-        $responseBytes = [System.Text.Encoding]::UTF8.GetBytes($response + "`n")
-        $Stream.Write($responseBytes, 0, $responseBytes.Length)
-        $Stream.Flush()
-        
-        # Cross-verification: compute what client should get using our values  
-        $clientShouldGet = [System.Numerics.BigInteger]::ModPow($ourKeys.PublicKey, 999, $script:DH_P)
-        Write-Host "DH Debug - Cross-verify: our_public^999 = $($clientShouldGet.ToString().Substring(0, 30))..." -ForegroundColor Magenta
-        
-        # Compute shared secret
-        $sharedSecret = Compute-DHSharedSecret -TheirPublicKey $clientPublicKey -MyPrivateKey $ourKeys.PrivateKey
-        
-        Write-Host "DH Debug - Client public key: $($clientPublicKey.ToString().Substring(0, 50))..." -ForegroundColor Magenta
-        Write-Host "DH Debug - Our private key: $($ourKeys.PrivateKey.ToString().Substring(0, 50))..." -ForegroundColor Magenta
-        Write-Host "DH Debug - Our public key: $($ourKeys.PublicKey.ToString().Substring(0, 50))..." -ForegroundColor Magenta
-        
-        return $sharedSecret
+        Write-Host "DH handshake with client '$clientId' (paired: $([bool]$secret), pairing: $isPairing)" -ForegroundColor Gray
+        return $session
     }
     catch {
         Write-Host "DH handshake failed: $($_.Exception.Message)" -ForegroundColor Red
@@ -255,123 +445,115 @@ function Handle-DHHandshake {
     }
 }
 
+function Show-PairingDialog {
+    param([string]$ClientId, [string]$RemoteEndpoint, [string]$Code)
+
+    $spacedCode = $Code.Substring(0, 3) + " " + $Code.Substring(3)
+    $message = "Pairing request from client '$ClientId' at $RemoteEndpoint.`n`n" +
+        "Approve only if the terminal on that client shows this same code:`n`n" +
+        "        $spacedCode`n`n" +
+        "If the codes differ, someone may be intercepting the connection. Approve pairing?"
+
+    try {
+        [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms") | Out-Null
+        $result = [System.Windows.Forms.MessageBox]::Show(
+            $message,
+            "Net Paste - Pair New Client",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning,
+            [System.Windows.Forms.MessageBoxDefaultButton]::Button2,
+            [System.Windows.Forms.MessageBoxOptions]::ServiceNotification
+        )
+        return ($result -eq [System.Windows.Forms.DialogResult]::Yes)
+    }
+    catch {
+        Write-Host "Pairing dialog failed: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
+function Handle-PairRequest {
+    param([System.Net.Sockets.NetworkStream]$Stream, [hashtable]$Session, [string]$RemoteEndpoint)
+
+    $code = Get-PairingCode -Transcript $Session.Transcript
+    Write-Host "Pairing request from client '$($Session.ClientId)' at $RemoteEndpoint - code $code" -ForegroundColor Yellow
+
+    if (-not (Show-PairingDialog -ClientId $Session.ClientId -RemoteEndpoint $RemoteEndpoint -Code $code)) {
+        Write-Host "Pairing rejected" -ForegroundColor Red
+        Send-JsonLine -Stream $Stream -Object @{ type = "pair_response"; status = "rejected" }
+        return
+    }
+
+    # The secret is derived from this connection's DH exchange; it never crosses the wire
+    $secret = Get-PairingSecret -DHKey $Session.DHKey -Transcript $Session.Transcript
+    Set-PairedClient -Pairings $Session.Pairings -ClientId $Session.ClientId -Secret $secret -RemoteEndpoint $RemoteEndpoint
+
+    # Encrypting the approval with the new session key proves to the client we derived the same secret
+    $sessionKey = Get-SessionKey -Secret $secret -Transcript $Session.Transcript
+    Send-EncryptedJsonLine -Stream $Stream -KeyBytes $sessionKey -Object @{ type = "pair_response"; status = "approved" }
+}
+
 function Handle-Authentication {
     [CmdletBinding()]
     param(
         [System.Net.Sockets.NetworkStream]$Stream,
-        [byte[]]$DHKey
+        [hashtable]$Session,
+        [string]$RemoteEndpoint
     )
+    # Returns the session key for an authenticated connection, otherwise $null
+    # (pairing requests also return $null: a pairing connection carries no command).
     
     try {
-        Write-Host "Waiting for encrypted authentication..." -ForegroundColor Yellow
-        
-        # Read encrypted authentication message
-        $buffer = New-Object byte[] 4096
-        $authData = ""
-        $consecutiveTimeouts = 0
-        
-        do {
-            try {
-                $bytesRead = $Stream.Read($buffer, 0, $buffer.Length)
-                if ($bytesRead -gt 0) {
-                    $consecutiveTimeouts = 0
-                    $authData += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $bytesRead)
-                    if ($authData.Contains("`n")) {
-                        break
-                    }
-                } elseif ($bytesRead -eq 0) {
-                    break
-                }
-            }
-            catch [System.IO.IOException] {
-                $consecutiveTimeouts++
-                if ($consecutiveTimeouts -ge 2) {
-                    throw "Timeout waiting for authentication"
-                }
-            }
-        } while ($bytesRead -gt 0)
-        
-        $authData = $authData.Trim()
-        
-        if (-not (Test-EncryptedMessage -Data $authData)) {
-            throw "Authentication message is not encrypted"
+        $line = Read-StreamLine -Stream $Stream
+        if (-not $line) {
+            throw "No authentication message received"
         }
-        
-        # Decrypt the authentication message
-        $decryptedAuth = Decrypt-DHData -EncryptedData $authData -KeyBytes $DHKey
-        if (-not $decryptedAuth) {
-            throw "Failed to decrypt authentication message"
-        }
-        
-        $authMsg = $decryptedAuth | ConvertFrom-Json
-        
-        if ($authMsg.type -ne "auth") {
-            throw "Invalid authentication message type"
-        }
-        
-        $clientSecret = $authMsg.secret
-        
-        # Get stored secret
-        $storedSecret = Get-StoredSecret
-        
-        $authResponse = $null
-        
-        if ($storedSecret) {
-            # We have a stored secret - validate it
-            if ($clientSecret -eq $storedSecret) {
-                Write-Host "Authentication successful - shared secret matches" -ForegroundColor Green
-                $authResponse = @{
-                    type = "auth_response"
-                    status = "accepted"
-                    message = "Authentication successful"
-                }
-            } else {
-                Write-Host "Authentication failed - shared secret mismatch" -ForegroundColor Red
-                $authResponse = @{
-                    type = "auth_response"
-                    status = "rejected"
-                    message = "Invalid shared secret"
-                }
+
+        if ($Session.IsPairing) {
+            $msg = $line | ConvertFrom-Json
+            if ($msg.type -ne "pair_request") {
+                throw "Expected pair_request, got '$($msg.type)'"
             }
-        } else {
-            # No stored secret - store the one we received
-            Store-SharedSecret -Secret $clientSecret
-            Write-Host "First connection - stored shared secret for future use" -ForegroundColor Yellow
-            $authResponse = @{
-                type = "auth_response"
-                status = "stored"
-                message = "Shared secret stored for future connections"
+            $revealed = [string]$msg.public_key_str
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $revealedHash = ConvertTo-HexString -Bytes $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($revealed))
+            $sha256.Dispose()
+            if ($revealedHash -cne $Session.Commit) {
+                throw "Revealed public key does not match the commitment"
             }
+            Complete-DHSession -Session $Session -ClientPublicStr $revealed
+            Handle-PairRequest -Stream $Stream -Session $Session -RemoteEndpoint $RemoteEndpoint
+            return $null
         }
-        
-        # Send encrypted response
-        $responseJson = $authResponse | ConvertTo-Json -Compress
-        $encryptedResponse = Encrypt-DHData -Data $responseJson -KeyBytes $DHKey
-        $responseBytes = [System.Text.Encoding]::UTF8.GetBytes($encryptedResponse + "`n")
-        $Stream.Write($responseBytes, 0, $responseBytes.Length)
-        $Stream.Flush()
-        
-        return ($authResponse.status -eq "accepted" -or $authResponse.status -eq "stored")
+
+        if (-not (Test-EncryptedMessage -Data $line)) {
+            throw "Unencrypted message on an authentication connection"
+        }
+
+        if (-not $Session.Secret) {
+            Send-JsonLine -Stream $Stream -Object @{ type = "auth_response"; status = "rejected"; message = "Client not paired. Run on the client: nppair (netpaste.py --pair)" }
+            throw "Client '$($Session.ClientId)' is not paired"
+        }
+
+        # Only a client holding the paired secret can derive this key; a man-in-the-middle cannot
+        $sessionKey = Get-SessionKey -Secret $Session.Secret -Transcript $Session.Transcript
+        $decrypted = Decrypt-DHData -EncryptedData $line -KeyBytes $sessionKey
+        $authMsg = $null
+        if ($decrypted) {
+            try { $authMsg = $decrypted | ConvertFrom-Json } catch { $authMsg = $null }
+        }
+        if (-not $authMsg -or $authMsg.type -ne "auth") {
+            Send-JsonLine -Stream $Stream -Object @{ type = "auth_response"; status = "rejected"; message = "Session key mismatch. Re-pair on the client: nppair (netpaste.py --pair)" }
+            throw "Session key mismatch for client '$($Session.ClientId)'"
+        }
+
+        Write-Host "Authenticated client '$($Session.ClientId)'" -ForegroundColor Green
+        Send-EncryptedJsonLine -Stream $Stream -KeyBytes $sessionKey -Object @{ type = "auth_response"; status = "accepted" }
+        return ,$sessionKey
     }
     catch {
-        Write-Host "Authentication handling failed: $($_.Exception.Message)" -ForegroundColor Red
-        
-        # Send error response
-        try {
-            $errorResponse = @{
-                type = "auth_response"
-                status = "error"
-                message = $_.Exception.Message
-            } | ConvertTo-Json -Compress
-            $encryptedError = Encrypt-DHData -Data $errorResponse -KeyBytes $DHKey
-            $errorBytes = [System.Text.Encoding]::UTF8.GetBytes($encryptedError + "`n")
-            $Stream.Write($errorBytes, 0, $errorBytes.Length)
-            $Stream.Flush()
-        } catch {
-            # Ignore errors sending error response
-        }
-        
-        return $false
+        Write-Host "Authentication failed: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
     }
 }
 
@@ -576,15 +758,16 @@ function Initialize-SystemTray {
         Write-Host "Flags set: shouldRestart=$($script:shouldRestart), shouldStop=$($script:shouldStop)" -ForegroundColor Yellow
     }.GetNewClosure())
     
-    $separatorItem = New-Object System.Windows.Forms.ToolStripSeparator
-    
+    $separatorItem1 = New-Object System.Windows.Forms.ToolStripSeparator
+    $separatorItem2 = New-Object System.Windows.Forms.ToolStripSeparator
+
     $clearSecretItem = New-Object System.Windows.Forms.ToolStripMenuItem
-    $clearSecretItem.Text = "Clear Shared Secret"
+    $clearSecretItem.Text = "Clear Client Pairings"
     $clearSecretItem.add_Click({
         param($sender, $e)
-        if (Clear-SharedSecret) {
+        if (Clear-AllPairings) {
             [System.Windows.Forms.MessageBox]::Show(
-                "Shared secret has been cleared. The next connection will establish a new trust.",
+                "All client pairings have been cleared. Each client must pair again with: netpaste --pair",
                 "NetPaste",
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Information
@@ -606,10 +789,10 @@ function Initialize-SystemTray {
     
     # Add items to context menu
     $contextMenu.Items.Add($statusItem) | Out-Null
-    $contextMenu.Items.Add($separatorItem) | Out-Null
+    $contextMenu.Items.Add($separatorItem1) | Out-Null
     $contextMenu.Items.Add($showItem) | Out-Null
     $contextMenu.Items.Add($hideItem) | Out-Null
-    $contextMenu.Items.Add($separatorItem) | Out-Null
+    $contextMenu.Items.Add($separatorItem2) | Out-Null
     $contextMenu.Items.Add($clearSecretItem) | Out-Null
     $contextMenu.Items.Add($restartItem) | Out-Null
     $contextMenu.Items.Add($exitItem) | Out-Null
@@ -676,36 +859,73 @@ try {
     # Type already exists, ignore
 }
 
+# Add Win32 focus/window management API once
+try {
+    Add-Type -TypeDefinition @"
+        using System;
+        using System.Runtime.InteropServices;
+
+        public class Win32Focus {
+            [DllImport("user32.dll")]
+            public static extern bool SetForegroundWindow(IntPtr hWnd);
+            [DllImport("user32.dll")]
+            public static extern bool BringWindowToTop(IntPtr hWnd);
+            [DllImport("user32.dll")]
+            public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+            [DllImport("user32.dll")]
+            public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+            [DllImport("user32.dll")]
+            public static extern bool AllowSetForegroundWindow(int dwProcessId);
+            [DllImport("user32.dll")]
+            public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")]
+            public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+            [DllImport("kernel32.dll")]
+            public static extern uint GetCurrentThreadId();
+            public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+            public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+            public const uint SWP_NOMOVE = 0x0002;
+            public const uint SWP_NOSIZE = 0x0001;
+        }
+"@ -ErrorAction SilentlyContinue
+} catch {
+    # Type already exists, ignore
+}
+
+function Set-WindowForeground {
+    param([IntPtr]$Handle)
+    try {
+        # Attach to the foreground window's thread to bypass Windows focus restrictions
+        $foregroundHwnd = [Win32Focus]::GetForegroundWindow()
+        $dummy = [uint32]0
+        $foregroundThread = [Win32Focus]::GetWindowThreadProcessId($foregroundHwnd, [ref]$dummy)
+        $ourThread = [Win32Focus]::GetCurrentThreadId()
+        $attached = $false
+        if ($foregroundThread -ne $ourThread) {
+            $attached = [Win32Focus]::AttachThreadInput($ourThread, $foregroundThread, $true)
+        }
+
+        [Win32Console]::ShowWindow($Handle, 9) | Out-Null  # SW_RESTORE
+        [Win32Focus]::BringWindowToTop($Handle) | Out-Null
+        [Win32Focus]::SetForegroundWindow($Handle) | Out-Null
+        # Temporarily set as topmost then remove to force to front
+        [Win32Focus]::SetWindowPos($Handle, [Win32Focus]::HWND_TOPMOST, 0, 0, 0, 0,
+            [Win32Focus]::SWP_NOMOVE -bor [Win32Focus]::SWP_NOSIZE) | Out-Null
+        [Win32Focus]::SetWindowPos($Handle, [Win32Focus]::HWND_NOTOPMOST, 0, 0, 0, 0,
+            [Win32Focus]::SWP_NOMOVE -bor [Win32Focus]::SWP_NOSIZE) | Out-Null
+
+        if ($attached) {
+            [Win32Focus]::AttachThreadInput($ourThread, $foregroundThread, $false) | Out-Null
+        }
+    } catch {
+        # Best-effort focus
+    }
+}
+
 function Show-ConsoleWindow {
     try {
         $consoleWindow = [Win32Console]::GetConsoleWindow()
-        [Win32Console]::ShowWindow($consoleWindow, 9) # SW_RESTORE
-        
-        # Try to bring window to front
-        Add-Type -TypeDefinition @"
-            using System;
-            using System.Runtime.InteropServices;
-            public class Win32Focus {
-                [DllImport("user32.dll")]
-                public static extern bool SetForegroundWindow(IntPtr hWnd);
-                [DllImport("user32.dll")]
-                public static extern bool BringWindowToTop(IntPtr hWnd);
-                [DllImport("user32.dll")]
-                public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
-                public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
-                public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
-                public const uint SWP_NOMOVE = 0x0002;
-                public const uint SWP_NOSIZE = 0x0001;
-            }
-"@ -ErrorAction SilentlyContinue
-        
-        # Bring window to top
-        [Win32Focus]::BringWindowToTop($consoleWindow) | Out-Null
-        [Win32Focus]::SetForegroundWindow($consoleWindow) | Out-Null
-        # Temporarily set as topmost then remove to force to front
-        [Win32Focus]::SetWindowPos($consoleWindow, [Win32Focus]::HWND_TOPMOST, 0, 0, 0, 0, [Win32Focus]::SWP_NOMOVE -bor [Win32Focus]::SWP_NOSIZE) | Out-Null
-        [Win32Focus]::SetWindowPos($consoleWindow, [Win32Focus]::HWND_NOTOPMOST, 0, 0, 0, 0, [Win32Focus]::SWP_NOMOVE -bor [Win32Focus]::SWP_NOSIZE) | Out-Null
-        
+        Set-WindowForeground -Handle $consoleWindow
         $script:consoleVisible = $true
     }
     catch {
@@ -1137,6 +1357,136 @@ function Show-NotificationDialog {
     $form.ShowDialog() | Out-Null
 }
 
+function Show-TextInputDialog {
+    param([string]$Prompt, [string]$RemoteEndpoint)
+
+    try {
+        # Create a Windows Forms dialog for text input
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+
+        # Create form
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = "NetPaste - Text Input from $RemoteEndpoint"
+        $form.Size = New-Object System.Drawing.Size(600, 400)
+        $form.StartPosition = "CenterScreen"
+        $form.TopMost = $true
+        $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+
+        # Create label
+        $label = New-Object System.Windows.Forms.Label
+        $label.Location = New-Object System.Drawing.Point(10, 10)
+        $label.Size = New-Object System.Drawing.Size(560, 30)
+        $label.Text = $Prompt
+
+        # Create textbox
+        $textBox = New-Object System.Windows.Forms.RichTextBox
+        $textBox.Location = New-Object System.Drawing.Point(10, 45)
+        $textBox.Size = New-Object System.Drawing.Size(560, 270)
+        $textBox.Multiline = $true
+        $textBox.AcceptsTab = $true
+        $textBox.ScrollBars = "Both"
+        $textBox.Font = New-Object System.Drawing.Font("Consolas", 11)
+        $textBox.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor
+                         [System.Windows.Forms.AnchorStyles]::Bottom -bor
+                         [System.Windows.Forms.AnchorStyles]::Left -bor
+                         [System.Windows.Forms.AnchorStyles]::Right
+
+        # Create OK button
+        $okButton = New-Object System.Windows.Forms.Button
+        $okButton.Location = New-Object System.Drawing.Point(400, 325)
+        $okButton.Size = New-Object System.Drawing.Size(80, 30)
+        $okButton.Text = "OK"
+        $okButton.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor
+                           [System.Windows.Forms.AnchorStyles]::Right
+        $okButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+
+        # Create Cancel button
+        $cancelButton = New-Object System.Windows.Forms.Button
+        $cancelButton.Location = New-Object System.Drawing.Point(490, 325)
+        $cancelButton.Size = New-Object System.Drawing.Size(80, 30)
+        $cancelButton.Text = "Cancel"
+        $cancelButton.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor
+                               [System.Windows.Forms.AnchorStyles]::Right
+        $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+
+        # Add controls to form
+        $form.Controls.Add($label)
+        $form.Controls.Add($textBox)
+        $form.Controls.Add($okButton)
+        $form.Controls.Add($cancelButton)
+        $form.AcceptButton = $okButton
+        $form.CancelButton = $cancelButton
+
+        # Show dialog and get result
+        $result = $form.ShowDialog()
+
+        if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+            return @{success = $true; text = $textBox.Text}
+        }
+        return @{success = $false; cancelled = $true}
+    }
+    catch {
+        # Fallback to console input
+        Write-Host "`n=== TEXT INPUT REQUEST ===" -ForegroundColor Yellow
+        Write-Host "From: $RemoteEndpoint" -ForegroundColor Cyan
+        Write-Host "Prompt: $Prompt" -ForegroundColor Cyan
+        Write-Host "Enter text (end with Ctrl+Z on a new line):" -ForegroundColor Yellow
+
+        $inputText = @()
+        while ($true) {
+            $line = Read-Host
+            if ($line -eq $null) { break }
+            $inputText += $line
+        }
+
+        return @{success = $true; text = ($inputText -join "`n")}
+    }
+}
+
+function Show-FilePickerDialog {
+    param([string]$RemoteEndpoint)
+
+    try {
+        # Create OpenFileDialog
+        Add-Type -AssemblyName System.Windows.Forms
+
+        $openFileDialog = New-Object System.Windows.Forms.OpenFileDialog
+        $openFileDialog.Title = "NetPaste - Select File to Send to $RemoteEndpoint"
+        $openFileDialog.Filter = "All Files (*.*)|*.*"
+        $openFileDialog.InitialDirectory = [Environment]::GetFolderPath('MyDocuments')
+
+        $result = $openFileDialog.ShowDialog()
+
+        if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+            $filePath = $openFileDialog.FileName
+
+            # Read file and encode as base64
+            try {
+                $fileBytes = [System.IO.File]::ReadAllBytes($filePath)
+                $base64Content = [Convert]::ToBase64String($fileBytes)
+                $fileName = [System.IO.Path]::GetFileName($filePath)
+
+                return @{
+                    success = $true
+                    filename = $fileName
+                    content = $base64Content
+                    filepath = $filePath
+                }
+            }
+            catch {
+                Write-Host "Error reading file: $_" -ForegroundColor Red
+                return @{success = $false; error = "Failed to read file: $_"}
+            }
+        }
+        return @{success = $false; cancelled = $true}
+    }
+    catch {
+        Write-Host "Error showing file picker: $_" -ForegroundColor Red
+        return @{success = $false; error = "Failed to show file picker: $_"}
+    }
+}
+
 function Show-Notification {
     param([string]$Message, [string]$RemoteEndpoint)
 
@@ -1253,25 +1603,25 @@ $script:SshfsCacheTime = $null
 
 function Get-SshfsDriveLetter {
     param([string]$RemoteIP)
-    
+
+    # Extract IP from remote endpoint (remove port) before any lookups
+    if ($RemoteIP -match '^([^:]+):\d+$') {
+        $RemoteIP = $Matches[1]
+    }
+
     # Use cache if it's less than 5 minutes old
-    if ($script:SshfsMountCache -and $script:SshfsCacheTime -and 
+    if ($script:SshfsMountCache -and $script:SshfsCacheTime -and
         ((Get-Date) - $script:SshfsCacheTime).TotalMinutes -lt 5) {
         $mount = $script:SshfsMountCache | Where-Object { $_.IPAddress -eq $RemoteIP } | Select-Object -First 1
         if ($mount) {
             return $mount.DriveLetter
         }
     }
-    
+
     # Refresh cache
     $script:SshfsMountCache = Find-SshfsMount
     $script:SshfsCacheTime = Get-Date
-    
-    # Extract IP from remote endpoint (remove port)
-    if ($RemoteIP -match '^([^:]+):\d+$') {
-        $RemoteIP = $Matches[1]
-    }
-    
+
     # Find mount for this IP
     $mount = $script:SshfsMountCache | Where-Object { $_.IPAddress -eq $RemoteIP } | Select-Object -First 1
     
@@ -1328,6 +1678,9 @@ function Convert-UnixToWindowsPath {
         [string]$RemoteEndpoint = $null
     )
 
+    # Remove trailing slash if present (causes explorer to fail)
+    $UnixPath = $UnixPath.TrimEnd('/')
+
     # Remove leading slash if present
     if ($UnixPath.StartsWith("/")) {
         $UnixPath = $UnixPath.Substring(1)
@@ -1343,6 +1696,11 @@ function Convert-UnixToWindowsPath {
     # Convert to Windows path with detected drive
     $windowsPath = "$driveLetter\$($UnixPath -replace "/", "\")"
 
+    # If path points to a file, use its parent directory (explorer needs a directory)
+    if ((Test-Path $windowsPath -PathType Leaf)) {
+        $windowsPath = Split-Path $windowsPath -Parent
+    }
+
     return $windowsPath
 }
 
@@ -1351,6 +1709,9 @@ function Convert-UnixToWindowsFilePath {
         [string]$UnixPath,
         [string]$RemoteEndpoint = $null
     )
+
+    # Remove trailing slash if present (causes file open to fail)
+    $UnixPath = $UnixPath.TrimEnd('/')
 
     # Remove leading slash if present
     if ($UnixPath.StartsWith("/")) {
@@ -1374,54 +1735,30 @@ function Open-FileExplorer {
     param([string]$WindowsPath)
 
     try {
-        if (Test-Path $WindowsPath) {
-            # Start explorer process
-            $process = Start-Process -FilePath "explorer.exe" -ArgumentList "`"$WindowsPath`"" -PassThru
-            
-            # Give it a moment to start
-            Start-Sleep -Milliseconds 1000
-            
-            # Try to bring to front using COM object (more reliable)
-            try {
-                $shell = New-Object -ComObject "Shell.Application"
-                $windows = $shell.Windows()
-                
-                foreach ($window in $windows) {
-                    if ($window.LocationURL -like "*$($WindowsPath.Replace('\','%5C'))*" -or 
-                        $window.Document.Folder.Self.Path -eq $WindowsPath) {
-                        $window.Visible = $true
-                        $hwnd = $window.HWND
-                        
-                        # Use ShowWindow API to force to front
-                        Add-Type -TypeDefinition @"
-                            using System;
-                            using System.Runtime.InteropServices;
-                            public class User32 {
-                                [DllImport("user32.dll")]
-                                public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-                                [DllImport("user32.dll")]
-                                public static extern bool SetForegroundWindow(IntPtr hWnd);
-                                [DllImport("user32.dll")]
-                                public static extern bool BringWindowToTop(IntPtr hWnd);
-                            }
-"@
-                        [User32]::ShowWindow([IntPtr]$hwnd, 9)  # SW_RESTORE
-                        [User32]::SetForegroundWindow([IntPtr]$hwnd)
-                        [User32]::BringWindowToTop([IntPtr]$hwnd)
-                        break
-                    }
-                }
+        # Snapshot existing explorer window handles before launch
+        $shell = New-Object -ComObject "Shell.Application"
+        $beforeHwnds = @($shell.Windows() | ForEach-Object { $_.HWND })
+
+        # Launch explorer (works for both local and network paths)
+        Start-Process -FilePath "explorer.exe" -ArgumentList "`"$WindowsPath`""
+
+        # Poll for the new window (up to 3 seconds)
+        $newHwnd = $null
+        for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Milliseconds 100
+            $afterHwnds = @($shell.Windows() | ForEach-Object { $_.HWND })
+            $newHwnds = $afterHwnds | Where-Object { $_ -notin $beforeHwnds }
+            if ($newHwnds) {
+                $newHwnd = $newHwnds | Select-Object -First 1
+                break
             }
-            catch {
-                # Note: Using basic explorer launch (window may stay in background)
-            }
-            
-            return $true
-        } else {
-            # Still try to open it in case it's a valid network path
-            Start-Process -FilePath "explorer.exe" -ArgumentList "`"$WindowsPath`""
-            return $true
         }
+
+        if ($newHwnd) {
+            Set-WindowForeground -Handle ([IntPtr]$newHwnd)
+        }
+
+        return $true
     }
     catch {
         return $false
@@ -1591,6 +1928,7 @@ try {
                     $receivedText = ""
                     $consecutiveTimeouts = 0
                     $isDHHandshake = $false
+                    $sessionKey = $null
 
                     Write-Host "[$(Get-Date -Format 'HH:mm:ss.fff')] Reading data from client $remoteEndpoint..." -ForegroundColor Cyan
 
@@ -1644,17 +1982,15 @@ try {
                         Write-Host "DH Handshake test result: $isHandshake" -ForegroundColor Gray
                         if ($isDHHandshake -or $isHandshake) {
                             Write-Host "Processing DH handshake..." -ForegroundColor Yellow
-                            $dhKey = Handle-DHHandshake -Stream $stream -HandshakeData $receivedText
-                            if ($dhKey) {
+                            $session = Handle-DHHandshake -Stream $stream -HandshakeData $receivedText
+                            if ($session) {
                                 Write-Host "DH handshake successful" -ForegroundColor Green
                                 
-                                # Handle authentication with shared secret
-                                if (-not (Handle-Authentication -Stream $stream -DHKey $dhKey)) {
-                                    Write-Host "Authentication failed - closing connection" -ForegroundColor Red
-                                    # Show console on authentication errors
-                                    if (-not $script:consoleVisible) {
-                                        Show-ConsoleWindow
-                                    }
+                                # Authenticate with the paired secret (or handle a pairing request)
+                                $sessionKey = Handle-Authentication -Stream $stream -Session $session -RemoteEndpoint $remoteEndpoint
+                                if (-not $sessionKey) {
+                                    Write-Host "No authenticated session - closing connection" -ForegroundColor Yellow
+                                    $client.Close()
                                     continue
                                 }
                                 
@@ -1693,9 +2029,8 @@ try {
                                 # Decrypt with DH-derived key
                                 if ($receivedText.Length -gt 0 -and (Test-EncryptedMessage -Data $receivedText)) {
                                     Write-Host "Received encrypted payload: '$($receivedText.Substring(0, [Math]::Min(100, $receivedText.Length)))$(if ($receivedText.Length -gt 100) { '...' } else { '' })'" -ForegroundColor Cyan
-                                    Write-Host "Decrypting data with DH-derived key..." -ForegroundColor Yellow
-                                    # Use the raw DH key bytes directly, not converted to string
-                                    $decryptedText = Decrypt-DHData -EncryptedData $receivedText -KeyBytes $dhKey
+                                    Write-Host "Decrypting data with session key..." -ForegroundColor Yellow
+                                    $decryptedText = Decrypt-DHData -EncryptedData $receivedText -KeyBytes $sessionKey
                                     if ($decryptedText) {
                                         Write-Host "Successfully decrypted data: '$($decryptedText.Substring(0, [Math]::Min(100, $decryptedText.Length)))$(if ($decryptedText.Length -gt 100) { '...' } else { '' })'" -ForegroundColor Green
                                         $receivedText = $decryptedText
@@ -1708,7 +2043,9 @@ try {
                                         continue
                                     }
                                 } elseif ($receivedText.Length -gt 0) {
-                                    Write-Host "Received unencrypted data after DH handshake" -ForegroundColor Yellow
+                                    Write-Host "Rejected unencrypted data after authentication" -ForegroundColor Red
+                                    $client.Close()
+                                    continue
                                 } else {
                                     # No data after handshake, skip processing
                                     Write-Host "No data received after DH handshake" -ForegroundColor Yellow
@@ -1725,10 +2062,14 @@ try {
                             
                             # Now process the decrypted data (fall through to checks below)
                         }
-                        # Skip non-DH encrypted messages (no static keys supported)
-                        elseif (Test-EncryptedMessage -Data $receivedText) {
-                            Write-Host "Received encrypted data without DH handshake - ignoring" -ForegroundColor Yellow
+                        # Without a handshake there is no authentication: only allowed with -NoEncrypt
+                        elseif (-not $NoEncrypt -or (Test-EncryptedMessage -Data $receivedText)) {
+                            Write-Host "Rejected message from $remoteEndpoint without DH handshake and authentication" -ForegroundColor Red
+                            $client.Close()
                             continue
+                        }
+                        else {
+                            Write-Host "Processing unauthenticated message (-NoEncrypt)" -ForegroundColor Yellow
                         }
                         
                         # Process the actual message content (after any decryption)
@@ -1742,6 +2083,71 @@ try {
                             "restart" {
                                 Write-Host "Restart request received" -ForegroundColor Yellow
                                 exit 42  # Special exit code to signal restart
+                            }
+                            "get_text" {
+                                Write-Host "Text input request received" -ForegroundColor Yellow
+                                $prompt = if ($messageData.prompt) { $messageData.prompt } else { "Enter text:" }
+                                $result = Show-TextInputDialog -Prompt $prompt -RemoteEndpoint $remoteEndpoint
+
+                                # Send response back to client
+                                if ($result.success) {
+                                    $response = @{
+                                        type = "text_response"
+                                        status = "success"
+                                        text = $result.text
+                                    } | ConvertTo-Json -Compress
+                                } elseif ($result.cancelled) {
+                                    $response = @{
+                                        type = "text_response"
+                                        status = "cancelled"
+                                    } | ConvertTo-Json -Compress
+                                } else {
+                                    $response = @{
+                                        type = "text_response"
+                                        status = "error"
+                                        message = if ($result.error) { $result.error } else { "Unknown error" }
+                                    } | ConvertTo-Json -Compress
+                                }
+
+                                # Encrypt and send response
+                                $encryptedResponse = Encrypt-DHData -Data $response -KeyBytes $sessionKey
+                                $responseBytes = [System.Text.Encoding]::UTF8.GetBytes($encryptedResponse + "`n")
+                                $stream.Write($responseBytes, 0, $responseBytes.Length)
+                                $stream.Flush()
+                                Write-Host "Sent text response to client" -ForegroundColor Green
+                            }
+                            "get_file" {
+                                Write-Host "File request received" -ForegroundColor Yellow
+                                $result = Show-FilePickerDialog -RemoteEndpoint $remoteEndpoint
+
+                                # Send response back to client
+                                if ($result.success) {
+                                    Write-Host "Sending file: $($result.filename) ($([Math]::Round($result.content.Length / 1024, 2)) KB)" -ForegroundColor Green
+                                    $response = @{
+                                        type = "file_response"
+                                        status = "success"
+                                        filename = $result.filename
+                                        content = $result.content
+                                    } | ConvertTo-Json -Compress
+                                } elseif ($result.cancelled) {
+                                    $response = @{
+                                        type = "file_response"
+                                        status = "cancelled"
+                                    } | ConvertTo-Json -Compress
+                                } else {
+                                    $response = @{
+                                        type = "file_response"
+                                        status = "error"
+                                        message = if ($result.error) { $result.error } else { "Unknown error" }
+                                    } | ConvertTo-Json -Compress
+                                }
+
+                                # Encrypt and send response
+                                $encryptedResponse = Encrypt-DHData -Data $response -KeyBytes $sessionKey
+                                $responseBytes = [System.Text.Encoding]::UTF8.GetBytes($encryptedResponse + "`n")
+                                $stream.Write($responseBytes, 0, $responseBytes.Length)
+                                $stream.Flush()
+                                Write-Host "Sent file response to client" -ForegroundColor Green
                             }
                             "explorer" {
                                 $windowsPath = Convert-UnixToWindowsPath -UnixPath $messageData.path -RemoteEndpoint $remoteEndpoint
@@ -1761,7 +2167,7 @@ try {
                                 }
                             }
                             "vscode" {
-                                $windowsPath = Convert-UnixToWindowsPath -UnixPath $messageData.path -RemoteEndpoint $remoteEndpoint
+                                $windowsPath = Convert-UnixToWindowsFilePath -UnixPath $messageData.path -RemoteEndpoint $remoteEndpoint
                                 if (Show-VSCodeDialog -Path $windowsPath -RemoteEndpoint $remoteEndpoint) {
                                     Open-InVSCode -Path $windowsPath | Out-Null
                                 }

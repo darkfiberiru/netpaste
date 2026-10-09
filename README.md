@@ -34,16 +34,19 @@ All paths are automatically translated from Unix format to Windows paths (using 
 
 ## Platform Support
 
+> **Tested combination:** Python client on Linux/WSL → Windows PowerShell server.
+> Everything else is implemented but untested. See [SECURITY.md](SECURITY.md#what-has-been-tested).
+
 ### Client (Python)
-- ✅ **Linux** - Full support with auto IP detection via mosh/syslog (including WSL)
-- ✅ **macOS** - Full support 
-- ✅ **Windows** - Full support
-- ✅ **Any Python 3.6+ platform** - Core functionality works everywhere
+- ✅ **Linux / WSL** - Tested, in daily use (CLI and Claude Code MCP server), with auto IP detection via mosh/syslog
+- ⚠️ **macOS** - Untested
+- ⚠️ **Windows (native)** - Untested
+- ⚠️ **PowerShell client** (`client/np-client.ps1`) - Untested
 
 ### Server
-- ✅ **Windows** - PowerShell implementation (fully tested)
-- ✅ **macOS** - Swift implementation (complete, requires compilation)
-- ✅ **Linux** - Python implementation with GTK support
+- ✅ **Windows** - PowerShell implementation (tested, in daily use)
+- ⚠️ **macOS** - Swift implementation (untested; requires compilation)
+- ⚠️ **Linux** - Python implementation with GTK support (untested)
 
 ## Installation
 
@@ -209,21 +212,37 @@ The MCP server respects these environment variables:
 
 ## Security
 
-### Encryption
-- All communication uses Diffie-Hellman key exchange (RFC 3526 2048-bit MODP Group)
-- Messages are encrypted with AES-256-CBC
-- Each session establishes a new encryption key
+> ⚠️ **The custom protocol has not been audited.** Remaining weaknesses
+> include AES-CBC without a MAC and no in-session replay protection. Run it
+> only on trusted networks. Details: [SECURITY.md](SECURITY.md).
 
-### Authentication
-- Automatic shared secret authentication (required, but auto-provisioned)
-- Secrets stored in platform-appropriate locations:
-  - Windows: `%APPDATA%\NetPaste\secret.key`
-  - Linux: `~/.config/netpaste/secret.key`
-- Auto-provisioning on first connection:
-  - Linux client automatically generates a random secret if none exists
-  - Windows server accepts and stores the first secret it receives
-  - All subsequent connections must use the same shared secret
-- Clear stored secrets with `-c` flag on client or through tray menu on server
+### Pairing (once per client and server)
+```bash
+nppair                         # or: python3 client/netpaste.py --pair
+```
+The client and a dialog on the Windows server both show a 6-digit code.
+Approve on both ends only if the codes match. Each side then stores a secret
+derived from that exchange; the secret is never sent over the network.
+Until a client is paired, every command against that server fails with
+"Not paired".
+
+### Encryption and authentication
+- Diffie-Hellman key exchange (RFC 3526 2048-bit MODP Group), fresh per connection
+- Session key = HMAC of the paired secret over the handshake transcript, so a
+  man-in-the-middle without the secret cannot derive it
+- Messages are encrypted with AES-256-CBC (no MAC / integrity check)
+- The server only runs commands from authenticated sessions (unless started with `-NoEncrypt`)
+
+### Pairing storage
+- Windows server: `%APPDATA%\NetPaste\pairings.json` (one secret per client)
+- Linux client: `~/.config/netpaste/pairings.json` (one secret per server; `0600`)
+- Clear pairings with `-c` on the client, or "Clear Client Pairings" in the server's tray menu
+
+### Upgrading from the single shared secret
+Protocol v2 replaced the old auto-provisioned `secret.key`. Update both
+`client/netpaste.py` and `NetPaste-Windows.ps1`, restart the server, then run
+`nppair` once from each client. The Linux and macOS servers have not been
+updated to v2 yet.
 
 ## Dependencies
 
@@ -246,10 +265,10 @@ The MCP server respects these environment variables:
   - Notifications: `notify-send` (falls back to console output)
 
 ### Python Client (All Platforms)
-- Python 3.6+
-- No external dependencies for core functionality
+- Python 3.10+ when installed as a package (`pip`/`uv`), which is required by `mcp` 2.x
+- No external dependencies for core CLI functionality
 - Optional: netcat (nc) for auto IP detection from mosh (Linux only)
-- Optional: MCP support requires `pip install 'mcp[cli]'`
+- Optional: MCP support requires `pip install 'mcp[cli]>=2.3,<3'`
 
 ## Remote Development Workflow
 

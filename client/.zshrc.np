@@ -28,6 +28,9 @@ nptget() {
 # npr - Restart NetPaste server
 npr() { python3 ~/bin/netpaste.py -r; }
 
+# nppair - Pair this client with the NetPaste server (confirm the code on both ends)
+nppair() { python3 ~/bin/netpaste.py --pair "$@"; }
+
 # npls - Send ls output to NetPaste
 npls() { local dir="${1:-.}"; ls -la "$dir" | python3 ~/bin/netpaste.py -s; }
 
@@ -37,8 +40,8 @@ npgit() { local cmd="${1:-status}"; case "$cmd" in status|st) git status | pytho
 # nppath - Send current path to NetPaste
 nppath() { pwd | python3 ~/bin/netpaste.py -s; }
 
-# npo - Open file with default Windows application
-npo() { if [ $# -eq 0 ]; then echo "Usage: npo <filename>"; echo "Open file with default Windows application"; return 1; fi; local file="$1"; if [ ! -f "$file" ]; then echo "Error: File '$file' not found"; return 1; fi; python3 ~/bin/netpaste.py -o "$file"; }
+# npo - Open file or directory with default Windows application
+npo() { if [ $# -eq 0 ]; then echo "Usage: npo <file or directory>"; echo "Open file or directory with default Windows application"; return 1; fi; local file="$1"; if [ ! -e "$file" ]; then echo "Error: '$file' not found"; return 1; fi; python3 ~/bin/netpaste.py -o "$file"; }
 
 # npcode - Open file or folder in VS Code
 npcode() { if [ $# -eq 0 ]; then echo "Usage: npcode <file or folder>"; echo "Open file or folder in VS Code on Windows"; return 1; fi; python3 ~/bin/netpaste.py --vscode "$1"; }
@@ -48,6 +51,18 @@ npurl() { if [ $# -eq 0 ]; then echo "Usage: npurl <url>"; echo "Open URL in def
 
 # npnotify - Send notification to Windows
 npnotify() { if [ $# -eq 0 ]; then echo "Usage: npnotify <message>"; echo "Send notification message to Windows"; return 1; fi; python3 ~/bin/netpaste.py -n "$*"; }
+
+# npget - Get text input from server
+npget() {
+  local prompt="${*:-Enter text:}"
+  python3 ~/bin/netpaste.py --get-text "$prompt"
+}
+
+# npgetfile - Get file from server
+npgetfile() {
+  local dest_dir="${1:-.}"
+  python3 ~/bin/netpaste.py --get-file "$dest_dir"
+}
 
 # nph - Display help for all NetPaste functions
 nph() {
@@ -74,7 +89,12 @@ Remote Action Commands:
   npurl <url>         - Open a URL in the default browser on the remote host
   npnotify <message>  - Send a desktop notification to the remote host
 
+Server-to-Client Commands:
+  npget [prompt]      - Show text input dialog on server, output to stdout
+  npgetfile [dir]     - Show file picker on server, save to directory (default: current)
+
 Server Management:
   npr                 - Restart the NetPaste server
+  nppair              - Pair with the server (compare the code shown on both ends)
 EOF
 }

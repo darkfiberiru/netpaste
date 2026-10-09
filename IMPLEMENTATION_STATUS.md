@@ -1,19 +1,25 @@
 # NetPaste Implementation Status
 
 ## Overview
+
+> **Tested:** Python client on Linux/WSL (CLI + Claude Code MCP) → Windows PowerShell server.
+> **Untested:** Linux server, macOS server, PowerShell client, Python client on macOS/native Windows.
+> Known protocol weaknesses are listed in [SECURITY.md](SECURITY.md).
 NetPaste is a network clipboard and system integration tool with server implementations for Windows (PowerShell) and macOS (Swift), and a Python client for Linux/WSL.
 
 ## Server Feature Comparison
 
 ### ✅ Windows PowerShell Server (NetPaste-Windows.ps1)
-**Status: Fully Implemented and Tested**
+**Status: Implemented, tested, in daily use**
+
+New, not yet verified end to end: `get_text`, `get_file` server-to-client messages.
 
 #### Security Features
 - [x] Diffie-Hellman key exchange (RFC 3526 2048-bit MODP Group)
 - [x] AES-256-CBC encryption with PKCS7 padding
-- [x] Shared secret authentication
-- [x] Auto-provisioning on first connection
-- [x] Secure secret storage in `%APPDATA%\NetPaste\secret.key`
+- [x] Protocol v2: per-client secret mixed into the session key (never sent over the network)
+- [x] Pairing with a 6-digit code confirmed on both ends (`--pair`), no trust-on-first-use
+- [x] Pairings in `%APPDATA%\NetPaste\pairings.json` (owner-only ACL, plaintext, no DPAPI)
 
 #### Message Handlers
 - [x] `paste` - Clipboard operations with user dialog
@@ -23,7 +29,7 @@ NetPaste is a network clipboard and system integration tool with server implemen
 - [x] `vscode` - Open in Visual Studio Code
 - [x] `notification` - Desktop notifications
 - [x] `restart` - Server restart functionality
-- [x] `clear_secret` - Clear stored authentication
+- [x] Tray menu "Clear Client Pairings"
 
 #### Dynamic Features
 - [x] SSHFS mount detection via `net use` and process inspection
@@ -43,14 +49,14 @@ NetPaste is a network clipboard and system integration tool with server implemen
 - [x] `-NoEncrypt` - Disable encryption
 - [x] `-Child` - Internal use for subprocess
 
-### ✅ Linux Python Server (NetPaste-Linux.py)
-**Status: Fully Implemented and Ready to Run**
+### ⚠️ Linux Python Server (NetPaste-Linux.py)
+**Status: Implemented, untested** (no `get_text` / `get_file` handlers)
 
 #### Security Features
 - [x] Diffie-Hellman key exchange (RFC 3526 2048-bit MODP Group)
 - [x] Native Python implementation for DH operations
 - [x] AES-256-CBC encryption with PKCS7 padding (via cryptography library)
-- [x] Shared secret authentication
+- [x] Shared secret authentication (protocol v1 — incompatible with the current v2 client)
 - [x] Auto-provisioning on first connection
 - [x] Secure secret storage in `~/.config/netpaste/secret.key`
 
@@ -82,14 +88,14 @@ NetPaste is a network clipboard and system integration tool with server implemen
 - [x] `--no-tray` - Run without system tray
 - [x] `--no-encrypt` - Disable encryption
 
-### ✅ macOS Swift Server (NetPaste-macOS.swift)
-**Status: Fully Implemented (Requires Compilation)**
+### ⚠️ macOS Swift Server (NetPaste-macOS.swift)
+**Status: Implemented, untested (requires compilation)** (no `get_text` / `get_file` handlers)
 
 #### Security Features
 - [x] Diffie-Hellman key exchange (RFC 3526 2048-bit MODP Group)
 - [x] Custom BigInt implementation for DH operations
 - [x] AES-256-CBC encryption with PKCS7 padding
-- [x] Shared secret authentication
+- [x] Shared secret authentication (protocol v1 — incompatible with the current v2 client)
 - [x] Auto-provisioning on first connection
 - [x] Secure secret storage in `~/Library/Application Support/NetPaste/secret.key`
 
@@ -123,9 +129,10 @@ NetPaste is a network clipboard and system integration tool with server implemen
 ## Cross-Platform Compatibility
 
 ### Encryption & Authentication
-✅ **Fully Compatible**: Both servers implement the same DH key exchange and AES encryption, allowing secure communication:
-- Python client (any OS) → Windows server
-- Python client (any OS) → macOS server
+All servers implement the same DH key exchange and AES encryption, but only one pairing has been tested:
+- ✅ Python client (Linux/WSL) → Windows server: tested
+- ⚠️ Python client → macOS server: untested
+- ⚠️ Python client → Linux server: untested
 
 ### BigInt Implementation Note
 The macOS Swift server includes a custom BigInt implementation for Diffie-Hellman operations:
@@ -137,22 +144,22 @@ The macOS Swift server includes a custom BigInt implementation for Diffie-Hellma
 ## Client Implementation
 
 ### Python Client (netpaste.py)
-**Status: Fully Implemented and Cross-Platform**
+**Status: Implemented; tested on Linux/WSL only**
 
 #### Platform Support
 - ✅ **Linux** - Full support with auto IP detection via mosh/syslog (including WSL)
-- ✅ **macOS** - Full support
-- ✅ **Windows** - Full support
-- ✅ **Any Python 3.6+ platform** - Core functionality works everywhere
+- ⚠️ **macOS** - Untested
+- ⚠️ **Windows (native)** - Untested
+- Installed package / MCP mode requires Python 3.10+ (`mcp` 2.x)
 
 #### Features
 - [x] All message types supported
 - [x] DH key exchange client
 - [x] AES encryption/decryption
-- [x] Shared secret management
+- [x] Pairing (`--pair`) and per-server secrets in `~/.config/netpaste/pairings.json` (protocol v2)
 - [x] Automatic IP detection via mosh/syslog (Linux only)
 - [x] Manual IP configuration via environment variables (all platforms)
-- [x] MCP server mode for Claude Code integration
+- [x] MCP server mode for Claude Code integration (`mcp` 2.x `MCPServer`)
 - [x] Command-line interface
 
 #### Shell Aliases (.zshrc.np)
@@ -178,11 +185,12 @@ The macOS Swift server includes a custom BigInt implementation for Diffie-Hellma
 3. Grant necessary permissions for network access
 4. Test with Python client from Linux
 
-### Security Testing
-- [x] DH key exchange between all platform combinations
-- [x] Shared secret auto-provisioning
+### Security Testing (Python client ↔ Windows server only)
+- [ ] DH key exchange between all platform combinations (only client ↔ Windows exercised)
+- [x] Pairing with code confirmation (v2; tested against the server functions under pwsh on Linux, not yet on Windows)
 - [x] Rejection of invalid shared secrets
 - [x] Encrypted message transmission
+- [ ] Rejection of unauthenticated plaintext commands (not implemented; see SECURITY.md)
 
 ## Known Limitations
 
@@ -211,4 +219,4 @@ The macOS Swift server includes a custom BigInt implementation for Diffie-Hellma
 
 ## Summary
 
-NetPaste provides a complete, secure, cross-platform solution for clipboard and file system integration between remote development environments and local desktop systems. Both server implementations are feature-complete and compatible with the shared Python client, enabling seamless workflows across Windows, macOS, and Linux environments.
+NetPaste covers clipboard and desktop integration between remote development environments and local desktops. The Python client and Windows PowerShell server are tested and in daily use. The Linux and macOS servers are implemented but untested. The protocol has known security weaknesses (see [SECURITY.md](SECURITY.md)), so use it only on trusted networks.

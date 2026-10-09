@@ -76,6 +76,13 @@ npr() {
     python3 ~/bin/netpaste.py -r
 }
 
+# nppair - Pair this client with the NetPaste server (once per server)
+# Usage: nppair
+# Shows a 6-digit code; approve on both ends only if it matches the server's dialog
+nppair() {
+    python3 ~/bin/netpaste.py --pair "$@"
+}
+
 # npls - Send ls output to NetPaste
 # Usage: npls [directory]
 npls() {
@@ -187,6 +194,9 @@ npt "Quick message to clipboard"
 
 # Restart NetPaste server
 npr
+
+# Pair with the server (first use, or after clearing pairings)
+nppair
 
 # Send directory listings
 npls                     # Current directory
