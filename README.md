@@ -302,7 +302,7 @@ This tool is designed to solve real remote development pain points. Contribution
 
 ## License
 
-[Add your license here]
+Apache License 2.0. See [LICENSE](LICENSE).
 
 ## Author
 
