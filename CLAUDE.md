@@ -124,7 +124,7 @@ Path translation logic:
 - `NETPASTE_IP` - Target server IP (auto-detected on Linux if not set, from mosh-server's `user X connected from host: IP` journal line; needs mosh built with `--enable-syslog`, which Debian's package omits)
 - `NETPASTE_PORT` - Target server port (default: 9999)
 Pairing storage (protocol v2):
-- Linux/WSL client: `~/.config/netpaste/pairings.json` (client_id + one secret per server_id)
+- Linux client: `~/.config/netpaste/pairings.json` (client_id + one secret per server_id)
 - Windows server: `%APPDATA%\NetPaste\pairings.json` (server_id + one secret per client_id)
 - Legacy v1 `secret.key` files are ignored (Linux/macOS servers still use them)
 
@@ -163,4 +163,4 @@ The user's `~/.zshrc` has a `deploy_netpaste_mcp` alias that runs the above (fol
 - `docs/dh-compatibility-findings.md` - DH parameter cross-platform compatibility notes (Windows/macOS/Linux interop quirks)
 - `docs/NETPASTE_ALIASES.md` - Expanded reference for the `np*` shell aliases
 - `IMPLEMENTATION_STATUS.md` - Feature completeness snapshot
-- `SECURITY.md` - Known protocol weaknesses and the tested/untested component matrix (only Python client on Linux/WSL → Windows PowerShell server is tested)
+- `SECURITY.md` - Known protocol weaknesses and the tested/untested component matrix (only Python client on a remote Linux box → Windows PowerShell server is tested; WSL is not)

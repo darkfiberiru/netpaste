@@ -2,7 +2,7 @@
 
 ## Overview
 
-> **Tested:** Python client on Linux/WSL (CLI + Claude Code MCP) → Windows PowerShell server.
+> **Tested:** Python client on a remote Linux box (CLI + Claude Code MCP) → Windows PowerShell server. WSL is untested.
 > **Untested:** Linux server, macOS server, PowerShell client, Python client on macOS/native Windows.
 > Known protocol weaknesses are listed in [SECURITY.md](SECURITY.md).
 NetPaste is a network clipboard and system integration tool with server implementations for Windows (PowerShell) and macOS (Swift), and a Python client for Linux/WSL.
@@ -130,7 +130,7 @@ New, not yet verified end to end: `get_text`, `get_file` server-to-client messag
 
 ### Encryption & Authentication
 All servers implement the same DH key exchange and AES encryption, but only one pairing has been tested:
-- ✅ Python client (Linux/WSL) → Windows server: tested
+- ✅ Python client (remote Linux) → Windows server: tested
 - ⚠️ Python client → macOS server: untested
 - ⚠️ Python client → Linux server: untested
 
@@ -144,10 +144,11 @@ The macOS Swift server includes a custom BigInt implementation for Diffie-Hellma
 ## Client Implementation
 
 ### Python Client (netpaste.py)
-**Status: Implemented; tested on Linux/WSL only**
+**Status: Implemented; tested on remote Linux only**
 
 #### Platform Support
-- ✅ **Linux** - Full support with auto IP detection via mosh/syslog (including WSL)
+- ✅ **Linux** - Full support with auto IP detection via mosh/syslog
+- ⚠️ **WSL** - Untested; no mosh-based IP detection (set `NETPASTE_IP`)
 - ⚠️ **macOS** - Untested
 - ⚠️ **Windows (native)** - Untested
 - Installed package / MCP mode requires Python 3.10+ (`mcp` 2.x)

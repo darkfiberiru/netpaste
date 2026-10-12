@@ -111,7 +111,8 @@ protection.
 
 | Component | Status |
 |---|---|
-| Python client (`client/netpaste.py`), CLI on Linux/WSL → Windows server | **Tested, in use** (protocol v1) |
+| Python client (`client/netpaste.py`), CLI on a remote Linux box → Windows server | **Tested, in use** (protocol v1) |
+| Python client inside WSL on the server's own machine | Untested |
 | Python client as MCP server for Claude Code (Linux) | **Tested, in use** (protocol v1) |
 | Windows PowerShell server (`server/NetPaste-Windows.ps1`) | **Tested, in use** (protocol v1) |
 | Shell aliases (`client/.zshrc.np`), zsh | **Tested, in use** |

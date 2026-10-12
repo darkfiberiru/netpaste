@@ -57,11 +57,12 @@ All paths are automatically translated from Unix format to Windows paths (using 
 
 ## Platform Support
 
-> **Tested combination:** Python client on Linux/WSL → Windows PowerShell server.
+> **Tested combination:** Python client on a remote Linux box (over mosh/SSH) → Windows PowerShell server.
 > Everything else is implemented but untested. See [SECURITY.md](SECURITY.md#what-has-been-tested).
 
 ### Client (Python)
-- ✅ **Linux / WSL** - Tested, in daily use (CLI and Claude Code MCP server), with auto IP detection via mosh/syslog
+- ✅ **Linux (remote box)** - Tested, in daily use (CLI and Claude Code MCP server), with auto IP detection via mosh/syslog
+- ⚠️ **WSL** (client inside WSL on the same Windows machine) - Untested. Auto IP detection doesn't apply, because there's no mosh connection to log. Set `NETPASTE_IP` to the Windows host instead: the default gateway (`ip route show default`) in WSL2's default NAT mode, or `127.0.0.1` in mirrored networking mode. SSHFS path translation doesn't fit either, because Windows sees WSL files at `\\wsl$\<distro>\…`, not on an SSHFS drive.
 - ⚠️ **macOS** - Untested
 - ⚠️ **Windows (native)** - Untested
 - ⚠️ **PowerShell client** (`client/np-client.ps1`) - Untested
@@ -101,6 +102,22 @@ The server restarts itself (`npr`, tray menu) with the same PowerShell it was st
 # Optional: Specify custom port
 .\server\NetPaste-Windows.ps1 -Port 8888
 ```
+
+#### Start at login
+
+Run the server **in your desktop session**. Don't run it as a Windows service,
+or as a scheduled task set to "Run whether user is logged on or not". Pairing,
+`npget`/`npgetfile`, notifications and the tray all open windows. A
+non-interactive session can't show them, so pairing would time out.
+
+The simplest way is a shortcut in your Startup folder. Press Win+R, run
+`shell:startup`, and create a shortcut with this target:
+```
+powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\path\to\NetPaste-Windows.ps1"
+```
+Use `pwsh.exe` instead to run under PowerShell 7. Alternatively, create a
+Task Scheduler task triggered **At log on**, with **Run only when user is
+logged on**.
 
 ### Linux Server (Python)
 ```bash
@@ -150,6 +167,22 @@ The Python client (`client/netpaste.py`) serves two purposes:
 2. **MCP server** for integration with Claude Desktop (Claude Code)
 
 #### CLI Installation
+
+The shell aliases in `client/.zshrc.np` all call `python3 ~/bin/netpaste.py`,
+so the client must be at that path, or you must edit the aliases. In the
+tested setup, both files are symlinks into a clone of this repo, so a
+`git pull` updates them:
+```bash
+mkdir -p ~/bin
+ln -s ~/git/netpaste/client/netpaste.py ~/bin/netpaste.py
+ln -s ~/git/netpaste/client/.zshrc.np ~/.zshrc.np
+echo 'source ~/.zshrc.np' >> ~/.zshrc
+```
+The aliases run the system `python3`, so install `cryptography` for it
+(`sudo apt install python3-cryptography`). The MCP server installed with
+`uvx` has its own environment and doesn't provide it to the CLI.
+
+Or copy the files instead of symlinking:
 ```bash
 # Linux/macOS
 cp client/netpaste.py ~/bin/
@@ -294,11 +327,12 @@ updated to v2 yet.
 Split by machine. The **remote box** runs the client (CLI, aliases, MCP server
 for Claude Code). The **Windows desktop** runs the server.
 
-### Remote box (client side: Linux / WSL)
+### Remote box (client side: Linux)
 
 | Needed for | Software |
 |---|---|
 | Everything | Python 3 with `cryptography` (`apt install python3-cryptography` or `pip install cryptography`); every session is encrypted, so it isn't optional |
+| Shell aliases | `client/netpaste.py` at `~/bin/netpaste.py` (a symlink into the repo in the tested setup) |
 | Everything | A network route to the Windows server on TCP 9999 (see [Windows Server](#windows-server-powershell)) |
 | Auto IP detection | mosh-server built with `--enable-syslog`, plus a persistent journald journal (`journalctl`); otherwise set `NETPASTE_IP` (see [Network Discovery](#network-discovery)) |
 | `npd`, `npo`, `npcode` | An SSH server that Windows can reach, for the SSHFS mount (see [Related Tools](#related-tools-windows-server)) |
@@ -314,8 +348,8 @@ for Claude Code). The **Windows desktop** runs the server.
 | Everything | PowerShell 5.1 (built in) or PowerShell 7+, and .NET Framework (built in) |
 | Everything | Execution policy that allows the script; an inbound firewall rule if connections are blocked (see [Windows Server](#windows-server-powershell)) |
 | `npd`, `npo`, `npcode` on remote files | WinFsp, SSHFS-Win, SSHFS-Win Manager (see [Related Tools](#related-tools-windows-server)) |
-| `npcode` | [VS Code](https://code.visualstudio.com/) with `code` on the PATH (the installer's "Add to PATH" option, on by default) |
-| Connecting to the remote box | A mosh client, plus SSH for SSHFS |
+| `npcode` | [VS Code](https://code.visualstudio.com/) with `code` on the PATH (the installer's "Add to PATH" option, on by default). It opens the folder over the SSHFS drive, which works but is slow on large repos |
+| Connecting to the remote box | A mosh client: e.g. `mosh` inside WSL, Cygwin's `mosh` package, or [MobaXterm](https://mobaxterm.mobatek.net/) (built-in mosh). OpenSSH (built into Windows 10+) for the SSHFS key setup |
 
 ### Other servers (untested, protocol v1 only)
 
@@ -385,6 +419,15 @@ The server matches a mount to a client by **exact IP address**, and it maps
 | Authentication method | **Key file**, using a key without a passphrase | SSHFS-Win can't prompt for a key passphrase. Passwords are stored in plain JSON ([issue #28](https://github.com/evsar3/sshfs-win-manager/issues/28)) |
 | Path | `/` (the root of the remote filesystem) | Paths are translated as `/home/user/x` → `F:\home\user\x`, so the drive must show the remote root, not your home directory |
 | Drive letter | `F:` (or any free letter, or Auto) | Any letter works. The server reads it from the running `sshfs.exe` command line, and `F:` is the fallback |
+
+**SSH key for the mount.** Create a dedicated key on Windows with no
+passphrase, and authorize it on the remote box. Since it's stored unencrypted,
+don't reuse your main key:
+```powershell
+ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\netpaste_sshfs
+type $env:USERPROFILE\.ssh\netpaste_sshfs.pub | ssh user@192.168.1.50 "cat >> ~/.ssh/authorized_keys"
+```
+Press Enter twice at the passphrase prompts to leave it empty. Point **Key File** at `%USERPROFILE%\.ssh\netpaste_sshfs`.
 
 **Advanced** tab: turn on **Connect on Startup** and **Try to Reconnect on
 Connection Loss**. In the app settings, turn on starting with Windows. Use the
