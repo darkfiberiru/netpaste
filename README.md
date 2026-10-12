@@ -62,7 +62,7 @@ All paths are automatically translated from Unix format to Windows paths (using 
 
 ### Client (Python)
 - ✅ **Linux (remote box)** - Tested, in daily use (CLI and Claude Code MCP server), with auto IP detection via mosh/syslog
-- ⚠️ **WSL** (client inside WSL on the same Windows machine) - Untested. Auto IP detection doesn't apply, because there's no mosh connection to log. Set `NETPASTE_IP` to the Windows host instead: the default gateway (`ip route show default`) in WSL2's default NAT mode, or `127.0.0.1` in mirrored networking mode. SSHFS path translation doesn't fit either, because Windows sees WSL files at `\\wsl$\<distro>\…`, not on an SSHFS drive.
+- ⚠️ **WSL** (client inside WSL on the same Windows machine) - Untested. Auto IP detection doesn't apply, because there's no mosh connection to log. Set `NETPASTE_IP` to the Windows host instead: the default gateway (`ip route show default`) in WSL2's default NAT mode, or `127.0.0.1` in mirrored networking mode. No SSHFS mount is needed. Inside WSL, the client converts paths with `wslpath -w` and sends Windows paths: `/mnt/c/…` → `C:\…`, everything else → `\\wsl.localhost\<distro>\…`. `npd`/`npo` open them directly. `npcode` opens WSL paths with `code --remote wsl+<distro>`, which needs VS Code's [WSL extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-wsl). Set `NETPASTE_PATH_MODE=unix` to turn this off, e.g. when the WSL client targets a different Windows machine.
 - ⚠️ **macOS** - Untested
 - ⚠️ **Windows (native)** - Untested
 - ⚠️ **PowerShell client** (`client/np-client.ps1`) - Untested
@@ -287,6 +287,7 @@ netpaste-mcp
 The MCP server respects these environment variables:
 - `NETPASTE_IP` - Target server IP (auto-detected from mosh if not set)
 - `NETPASTE_PORT` - Target server port (default: 9999)
+- `NETPASTE_PATH_MODE` - `auto` (default: Windows paths via `wslpath` inside WSL, Unix paths otherwise), `unix` (always Unix paths for SSHFS translation), or `wsl` (always `wslpath`)
 
 ## Security
 

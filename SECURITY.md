@@ -78,6 +78,14 @@ connection orders or de-duplicates messages.
 
 ### Medium / Low
 
+**Windows paths from WSL clients.** A client can send `path_style: "windows"`
+with a Windows path (WSL clients do this via `wslpath`). The server accepts only
+drive paths and `\\wsl.localhost\` / `\\wsl$\` shares, and refuses other UNC
+paths, because opening `\\host\share` would make Windows send NTLM credentials
+to that host. Like before, every explorer, open-file or VS Code request still
+needs the user to approve a dialog. A paired client can now point at any local
+drive, not only its SSHFS mount.
+
 **3. Listener binds all interfaces** (`IPAddress::Any`). With v2 an
 unauthenticated peer can no longer run commands, but it can still open
 connections and trigger a pairing dialog.

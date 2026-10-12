@@ -567,6 +567,39 @@ def send_to_netpaste_with_response(data, ip=None, port=DEFAULT_PORT, timeout=60)
         print(f"Error communicating with server: {e}", file=sys.stderr)
         return None
 
+def running_in_wsl():
+    """True when this client runs inside WSL on the Windows machine itself"""
+    if os.environ.get('WSL_DISTRO_NAME'):
+        return True
+    try:
+        with open('/proc/sys/kernel/osrelease') as f:
+            return 'microsoft' in f.read().lower()
+    except OSError:
+        return False
+
+def path_message(msg_type, path):
+    """Build a path-carrying message (explorer / open_file / vscode).
+
+    Normally the path is sent as a Unix path, and the server maps it onto the
+    SSHFS drive that mounts this box. Inside WSL there is no SSHFS mount: the
+    files are local to Windows, so convert with `wslpath -w` (giving C:\\...
+    for /mnt/c paths, \\\\wsl.localhost\\<distro>\\... otherwise) and mark
+    the path as already Windows-style. NETPASTE_PATH_MODE=unix forces the SSHFS
+    behaviour, e.g. when a WSL client targets a different Windows machine.
+    """
+    abs_path = os.path.abspath(os.path.expanduser(path)) if path else os.getcwd()
+    mode = os.environ.get('NETPASTE_PATH_MODE', 'auto').lower()
+    if mode != 'unix' and (mode == 'wsl' or running_in_wsl()):
+        try:
+            result = subprocess.run(['wslpath', '-w', abs_path],
+                                    capture_output=True, text=True, check=True)
+            win_path = result.stdout.strip()
+            if win_path:
+                return json.dumps({"type": msg_type, "path": win_path, "path_style": "windows"})
+        except (OSError, subprocess.CalledProcessError) as e:
+            log(f"wslpath failed for {abs_path}, sending Unix path: {e}")
+    return json.dumps({"type": msg_type, "path": abs_path})
+
 def paste_text(text, ip=None, port=DEFAULT_PORT):
     """Send text to be pasted to clipboard"""
     paste_message = json.dumps({"type": "paste", "text": text})
@@ -575,16 +608,14 @@ def paste_text(text, ip=None, port=DEFAULT_PORT):
 def open_explorer(path, ip=None, port=DEFAULT_PORT):
     """Send file explorer request"""
     # Resolve to absolute path
-    abs_path = os.path.abspath(os.path.expanduser(path))
-    explorer_message = json.dumps({"type": "explorer", "path": abs_path})
+    explorer_message = path_message("explorer", path)
     print(f"Sending explorer message: {explorer_message}", file=sys.stderr)
     return send_to_netpaste(explorer_message, ip, port)
 
 def open_file(path, ip=None, port=DEFAULT_PORT):
     """Send file open request"""
     # Resolve to absolute path
-    abs_path = os.path.abspath(os.path.expanduser(path))
-    file_message = json.dumps({"type": "open_file", "path": abs_path})
+    file_message = path_message("open_file", path)
     print(f"Sending file open message: {file_message}", file=sys.stderr)
     return send_to_netpaste(file_message, ip, port)
 
@@ -633,9 +664,8 @@ def get_tmux_buffer():
 def open_vscode(path, ip=None, port=DEFAULT_PORT):
     """Send VS Code open request"""
     # Resolve to absolute path
-    abs_path = os.path.abspath(os.path.expanduser(path))
-    vscode_message = json.dumps({"type": "vscode", "path": abs_path})
-    print(f"Sending VS Code open request: {abs_path}", file=sys.stderr)
+    vscode_message = path_message("vscode", path)
+    print(f"Sending VS Code open request: {vscode_message}", file=sys.stderr)
     return send_to_netpaste(vscode_message, ip, port)
 
 def restart_netpaste(ip=None, port=DEFAULT_PORT):
@@ -797,7 +827,7 @@ def run_mcp_server():
         # Resolve path
         resolved_path = os.path.abspath(path) if path else os.getcwd()
         
-        explorer_message = json.dumps({"type": "explorer", "path": resolved_path})
+        explorer_message = path_message("explorer", resolved_path)
         if send_to_netpaste(explorer_message, target_ip, default_port):
             return f"Opened File Explorer at: {resolved_path}"
         return f"Failed to open File Explorer at: {resolved_path}"
@@ -813,7 +843,7 @@ def run_mcp_server():
             return f"Error: File '{file_path}' not found"
         
         abs_path = os.path.abspath(file_path)
-        file_message = json.dumps({"type": "open_file", "path": abs_path})
+        file_message = path_message("open_file", abs_path)
         
         if send_to_netpaste(file_message, target_ip, default_port):
             return f"Opened file: {abs_path}"

@@ -1164,8 +1164,16 @@ function Open-InVSCode {
             return $false
         }
         
-        # Open path in VS Code
-        Start-Process "code" -ArgumentList "`"$Path`"" -NoNewWindow
+        # WSL share paths open through the WSL extension (code --remote wsl+<distro> /linux/path),
+        # which avoids VS Code's UNC host allowlist and runs tools inside WSL
+        if ($Path -match '^\\\\(?:wsl\.localhost|wsl\$)\\(?<distro>[^\\]+)(?<rest>.*)$') {
+            $linuxPath = $Matches['rest'] -replace '\\', '/'
+            if (-not $linuxPath) { $linuxPath = "/" }
+            Start-Process "code" -ArgumentList "--remote `"wsl+$($Matches['distro'])`" `"$linuxPath`"" -NoNewWindow
+        }
+        else {
+            Start-Process "code" -ArgumentList "`"$Path`"" -NoNewWindow
+        }
         Write-Host "Opened in VS Code: $Path" -ForegroundColor Green
         return $true
     }
@@ -1670,6 +1678,48 @@ function Convert-UnixToWindowsFilePath {
     return $windowsPath
 }
 
+function Test-AllowedWindowsPath {
+    <#
+    .SYNOPSIS
+        Checks a Windows-style path sent by a WSL client (path_style "windows").
+        Allows drive paths (C:\...) and WSL shares (\\wsl.localhost\<distro>\..., \\wsl$\<distro>\...).
+        Any other UNC path is refused: opening \\host\share would make Windows authenticate to that host.
+    #>
+    param([string]$Path)
+    if ([string]::IsNullOrEmpty($Path) -or $Path.Contains("`0")) { return $false }
+    if ($Path -match '(^|[\\/])\.\.([\\/]|$)') { return $false }
+    return ($Path -match '^[A-Za-z]:\\' -or $Path -match '^\\\\(wsl\.localhost|wsl\$)\\[^\\]+')
+}
+
+function Get-ClientWindowsPath {
+    <#
+    .SYNOPSIS
+        Resolves the path in an explorer/open_file/vscode message to a Windows path.
+        WSL clients send Windows paths already (path_style "windows", from wslpath -w);
+        everyone else sends Unix paths that are mapped onto their SSHFS drive.
+        Returns $null if the path is refused.
+    #>
+    param($MessageData, [string]$RemoteEndpoint, [switch]$Directory)
+
+    if ($MessageData.path_style -eq "windows") {
+        $windowsPath = [string]$MessageData.path
+        if (-not (Test-AllowedWindowsPath -Path $windowsPath)) {
+            Write-Host "Rejected Windows path from $RemoteEndpoint`: $windowsPath" -ForegroundColor Red
+            return $null
+        }
+        # Explorer needs a directory
+        if ($Directory -and (Test-Path -LiteralPath $windowsPath -PathType Leaf)) {
+            $windowsPath = Split-Path $windowsPath -Parent
+        }
+        return $windowsPath
+    }
+
+    if ($Directory) {
+        return Convert-UnixToWindowsPath -UnixPath $MessageData.path -RemoteEndpoint $RemoteEndpoint
+    }
+    return Convert-UnixToWindowsFilePath -UnixPath $MessageData.path -RemoteEndpoint $RemoteEndpoint
+}
+
 function Open-FileExplorer {
     param([string]$WindowsPath)
 
@@ -2093,14 +2143,14 @@ try {
                                 Write-Host "Sent file response to client" -ForegroundColor Green
                             }
                             "explorer" {
-                                $windowsPath = Convert-UnixToWindowsPath -UnixPath $messageData.path -RemoteEndpoint $remoteEndpoint
-                                if (Show-FileExplorerDialog -Path $windowsPath -RemoteEndpoint $remoteEndpoint) {
+                                $windowsPath = Get-ClientWindowsPath -MessageData $messageData -RemoteEndpoint $remoteEndpoint -Directory
+                                if ($windowsPath -and (Show-FileExplorerDialog -Path $windowsPath -RemoteEndpoint $remoteEndpoint)) {
                                     Open-FileExplorer -WindowsPath $windowsPath | Out-Null
                                 }
                             }
                             "open_file" {
-                                $windowsPath = Convert-UnixToWindowsFilePath -UnixPath $messageData.path -RemoteEndpoint $remoteEndpoint
-                                if (Show-FileOpenDialog -Path $windowsPath -RemoteEndpoint $remoteEndpoint) {
+                                $windowsPath = Get-ClientWindowsPath -MessageData $messageData -RemoteEndpoint $remoteEndpoint
+                                if ($windowsPath -and (Show-FileOpenDialog -Path $windowsPath -RemoteEndpoint $remoteEndpoint)) {
                                     Open-File -WindowsPath $windowsPath | Out-Null
                                 }
                             }
@@ -2110,8 +2160,8 @@ try {
                                 }
                             }
                             "vscode" {
-                                $windowsPath = Convert-UnixToWindowsFilePath -UnixPath $messageData.path -RemoteEndpoint $remoteEndpoint
-                                if (Show-VSCodeDialog -Path $windowsPath -RemoteEndpoint $remoteEndpoint) {
+                                $windowsPath = Get-ClientWindowsPath -MessageData $messageData -RemoteEndpoint $remoteEndpoint
+                                if ($windowsPath -and (Show-VSCodeDialog -Path $windowsPath -RemoteEndpoint $remoteEndpoint)) {
                                     Open-InVSCode -Path $windowsPath | Out-Null
                                 }
                             }
