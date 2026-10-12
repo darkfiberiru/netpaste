@@ -82,7 +82,7 @@ One-time setup:
    Unblock-File .\server\NetPaste-Windows.ps1
    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
    ```
-2. **Firewall.** Allow inbound TCP 9999 (or your `-Port`). Restrict it to the network profile or remote addresses your remote box uses:
+2. **Firewall (only if needed).** You may not need a rule. Windows often allows the connection already, for example if you clicked "Allow" on the first-run prompt or your network is set as Private. Add one only if the reachability test in step 3 fails. Allow inbound TCP 9999 (or your `-Port`), restricted to the network profile or remote addresses your remote box uses:
    ```powershell
    New-NetFirewallRule -DisplayName "NetPaste" -Direction Inbound -Protocol TCP -LocalPort 9999 -Action Allow -Profile Private
    ```
@@ -312,7 +312,7 @@ for Claude Code). The **Windows desktop** runs the server.
 | Needed for | Software |
 |---|---|
 | Everything | PowerShell 5.1 (built in) or PowerShell 7+, and .NET Framework (built in) |
-| Everything | Execution policy that allows the script, and an inbound firewall rule (see [Windows Server](#windows-server-powershell)) |
+| Everything | Execution policy that allows the script; an inbound firewall rule if connections are blocked (see [Windows Server](#windows-server-powershell)) |
 | `npd`, `npo`, `npcode` on remote files | WinFsp, SSHFS-Win, SSHFS-Win Manager (see [Related Tools](#related-tools-windows-server)) |
 | `npcode` | [VS Code](https://code.visualstudio.com/) with `code` on the PATH (the installer's "Add to PATH" option, on by default) |
 | Connecting to the remote box | A mosh client, plus SSH for SSHFS |

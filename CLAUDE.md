@@ -143,7 +143,7 @@ Pairing storage (protocol v2):
 - `mcp[cli]` 2.x (for MCP server mode; uses `mcp.server.mcpserver.MCPServer`)
 
 ### Platform-Specific
-- Windows: PowerShell 5.1+ or 7+ (restart relaunches the same host via `(Get-Process -Id $PID).Path`), .NET Framework; inbound firewall rule for the port; VS Code `code` on PATH for `npcode`
+- Windows: PowerShell 5.1+ or 7+ (restart relaunches the same host via `(Get-Process -Id $PID).Path`), .NET Framework; inbound firewall rule for the port if connections are blocked (often not needed); VS Code `code` on PATH for `npcode`
 - Remote box (client side): `cryptography` is effectively required (all v2 sessions are encrypted); tmux/git for the matching aliases; uv/uvx + Claude Code CLI for MCP
 - macOS: Swift 5+, CommonCrypto
 - Linux: Optional GTK3 for GUI, xclip/xsel for clipboard
