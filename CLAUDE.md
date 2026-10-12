@@ -139,11 +139,12 @@ Pairing storage (protocol v2):
 
 ### Python Client/Server
 - Python 3.10+ for the installed package (required by `mcp` 2.x)
-- `cryptography` (optional, for enhanced encryption)
+- `cryptography` (required by the client for v2 encryption; optional only for the v1 Linux server)
 - `mcp[cli]` 2.x (for MCP server mode; uses `mcp.server.mcpserver.MCPServer`)
 
 ### Platform-Specific
-- Windows: PowerShell 5.1+, .NET Framework
+- Windows: PowerShell 5.1+ or 7+ (restart relaunches the same host via `(Get-Process -Id $PID).Path`), .NET Framework; inbound firewall rule for the port; VS Code `code` on PATH for `npcode`
+- Remote box (client side): `cryptography` is effectively required (all v2 sessions are encrypted); tmux/git for the matching aliases; uv/uvx + Claude Code CLI for MCP
 - macOS: Swift 5+, CommonCrypto
 - Linux: Optional GTK3 for GUI, xclip/xsel for clipboard
 

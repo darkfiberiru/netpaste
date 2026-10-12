@@ -31,7 +31,21 @@ sudo apt build-dep mosh
 git clone https://github.com/mobile-shell/mosh && cd mosh
 ./autogen.sh && ./configure --enable-syslog && make && sudo make install
 ```
-Only mosh-server on the remote box needs the flag; the mosh client on Windows is unchanged. Without it, set `NETPASTE_IP`.
+Only mosh-server on the remote box needs the flag; the mosh client on Windows is unchanged. To install without root, configure with `--prefix=$HOME/.local` and connect with `mosh --server=~/.local/bin/mosh-server …` (or make sure `~/.local/bin` is on the PATH for non-interactive SSH). Without any of this, set `NETPASTE_IP`.
+
+**The journal must be persistent.** mosh-server runs as you, so its log lines go to your own per-user journal, which you can read without `sudo` or extra groups. journald keeps per-user journals only with persistent storage. With the volatile (`/run`) journal, everything lands in the system journal, which a normal user can't read, so detection silently finds nothing. Enable persistent storage once with a drop-in:
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d
+printf '[Journal]\nStorage=persistent\n' | sudo tee /etc/systemd/journald.conf.d/50-persistent.conf
+sudo systemctl restart systemd-journald
+```
+
+(Alternatively, `sudo usermod -aG systemd-journal $USER` lets you read the system journal.) `kernel.dmesg_restrict` doesn't matter here, since it only governs `dmesg`. To check, reconnect with mosh, then run:
+
+```bash
+journalctl --grep 'connected from host' -o cat -q | tail -1
+```
 
 ### File System Access
 NetPaste works in conjunction with SSHFS to mount the remote system's filesystem on the local machine. This enables:
@@ -60,6 +74,23 @@ All paths are automatically translated from Unix format to Windows paths (using 
 ## Installation
 
 ### Windows Server (PowerShell)
+
+One-time setup:
+
+1. **Execution policy.** A downloaded script is blocked by default. Unblock this one file, or allow local scripts for your user:
+   ```powershell
+   Unblock-File .\server\NetPaste-Windows.ps1
+   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+   ```
+2. **Firewall.** Allow inbound TCP 9999 (or your `-Port`). Restrict it to the network profile or remote addresses your remote box uses:
+   ```powershell
+   New-NetFirewallRule -DisplayName "NetPaste" -Direction Inbound -Protocol TCP -LocalPort 9999 -Action Allow -Profile Private
+   ```
+   Add `-RemoteAddress 10.0.0.0/8` (your range) to narrow it further. On a VPN that Windows classifies as Public, use `-Profile Public` with `-RemoteAddress`.
+3. **Reachability.** The remote box connects *back* to Windows. mosh working doesn't prove this, because mosh connects from Windows to the remote box. Test from the remote box with `nc -zv <windows-ip> 9999` (or `echo test | np` after pairing). NAT, or a VPN without a return route, blocks it.
+
+The server restarts itself (`npr`, tray menu) with the same PowerShell it was started with: `powershell.exe` 5.1 or `pwsh.exe` 7.
+
 ```powershell
 # Run NetPaste server
 .\server\NetPaste-Windows.ps1
@@ -108,6 +139,11 @@ swiftc server/NetPaste-macOS.swift -o NetPaste
 ```
 
 ### Python Client (Dual-Purpose: CLI & MCP Server)
+
+Install the client on the **remote box**, where you work in the shell and run
+Claude Code. `uv`/`uvx`, the Claude Code CLI, the `mcp` package and the shell
+aliases all go here, not on the Windows server. (Running the client on Windows
+itself is untested.)
 
 The Python client (`client/netpaste.py`) serves two purposes:
 1. **Command-line tool** for sending data to NetPaste servers
@@ -255,16 +291,40 @@ updated to v2 yet.
 
 ## Dependencies
 
-### Windows Server
-- PowerShell 5.1 or PowerShell 7+
-- .NET Framework (for encryption and Windows Forms)
+Split by machine. The **remote box** runs the client (CLI, aliases, MCP server
+for Claude Code). The **Windows desktop** runs the server.
 
-### macOS Server
+### Remote box (client side: Linux / WSL)
+
+| Needed for | Software |
+|---|---|
+| Everything | Python 3 with `cryptography` (`apt install python3-cryptography` or `pip install cryptography`); every session is encrypted, so it isn't optional |
+| Everything | A network route to the Windows server on TCP 9999 (see [Windows Server](#windows-server-powershell)) |
+| Auto IP detection | mosh-server built with `--enable-syslog`, plus a persistent journald journal (`journalctl`); otherwise set `NETPASTE_IP` (see [Network Discovery](#network-discovery)) |
+| `npd`, `npo`, `npcode` | An SSH server that Windows can reach, for the SSHFS mount (see [Related Tools](#related-tools-windows-server)) |
+| `npt`, `nptget`, tmux MCP tools | `tmux` |
+| `npgit`, `send_git_output` | `git` |
+| Shell aliases | zsh or bash, sourcing `client/.zshrc.np` |
+| MCP server | Python 3.10+, `mcp[cli]>=2.3,<3` (installed for you by `uv`/`uvx` or `pip install -e .`), the [Claude Code](https://claude.com/claude-code) CLI, and [`uv`](https://docs.astral.sh/uv/) for the recommended install |
+
+### Windows desktop (server side)
+
+| Needed for | Software |
+|---|---|
+| Everything | PowerShell 5.1 (built in) or PowerShell 7+, and .NET Framework (built in) |
+| Everything | Execution policy that allows the script, and an inbound firewall rule (see [Windows Server](#windows-server-powershell)) |
+| `npd`, `npo`, `npcode` on remote files | WinFsp, SSHFS-Win, SSHFS-Win Manager (see [Related Tools](#related-tools-windows-server)) |
+| `npcode` | [VS Code](https://code.visualstudio.com/) with `code` on the PATH (the installer's "Add to PATH" option, on by default) |
+| Connecting to the remote box | A mosh client, plus SSH for SSHFS |
+
+### Other servers (untested, protocol v1 only)
+
+**macOS server**
 - macOS 10.14+ (for Swift 5 support)
 - Xcode Command Line Tools or full Xcode
 - CommonCrypto framework (included with macOS)
 
-### Linux Server
+**Linux server**
 - **Required**: Python 3.6+ (no external dependencies needed!)
 - **Optional enhancements**:
   - Clipboard: `xclip`, `xsel`, or `wl-clipboard` (falls back to file if not available)
@@ -272,13 +332,6 @@ updated to v2 yet.
   - System tray: GTK3 libraries (runs fine without)
   - Encryption: `pip3 install cryptography` (basic DH still works without)
   - Notifications: `notify-send` (falls back to console output)
-
-### Python Client (All Platforms)
-- Python 3.10+ when installed as a package (`pip`/`uv`), which is required by `mcp` 2.x
-- No external dependencies for core CLI functionality
-- Optional: netcat (nc) for auto IP detection from mosh (Linux only)
-- Optional: mosh-server built with `--enable-syslog` on the remote box, for auto IP detection (see [Network Discovery](#network-discovery))
-- Optional: MCP support requires `pip install 'mcp[cli]>=2.3,<3'`
 
 ## Remote Development Workflow
 

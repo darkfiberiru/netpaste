@@ -14,7 +14,6 @@
 param(
     [int]$Port = 9999,
     [switch]$Child,
-    [string]$Key,
     [switch]$NoTray,
     [switch]$NoEncrypt
 )
@@ -185,16 +184,6 @@ $script:DH_G = [System.Numerics.BigInteger]::new(2)
 
 # Load BigInteger support
 Add-Type -AssemblyName System.Numerics
-
-function Get-SHA256Hash {
-    param([string]$InputString)
-    
-    $sha256 = [System.Security.Cryptography.SHA256]::Create()
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($InputString)
-    $hashBytes = $sha256.ComputeHash($bytes)
-    $sha256.Dispose()
-    return $hashBytes
-}
 
 function Generate-DHKeypair {
     [CmdletBinding()]
@@ -608,57 +597,6 @@ function Test-EncryptedMessage {
     param([string]$Data)
     
     return $Data.StartsWith("NETPASTE_ENCRYPTED:")
-}
-
-function Decrypt-Data {
-    [CmdletBinding()]
-    param(
-        [string]$EncryptedData,
-        [string]$Key
-    )
-    
-    if (-not $Key) {
-        throw "Decryption key is required"
-    }
-    
-    try {
-        # Remove prefix
-        if (-not $EncryptedData.StartsWith("NETPASTE_ENCRYPTED:")) {
-            throw "Invalid encrypted data format"
-        }
-        
-        $payload = $EncryptedData.Substring(19)  # Remove "NETPASTE_ENCRYPTED:" prefix
-        $encryptedBytes = [System.Convert]::FromBase64String($payload)
-        
-        # Extract IV and ciphertext
-        $iv = $encryptedBytes[0..15]
-        $ciphertext = $encryptedBytes[16..($encryptedBytes.Length - 1)]
-        
-        # Derive key from password
-        $keyBytes = Get-SHA256Hash -InputString $Key
-        
-        # Create AES decryptor
-        $aes = [System.Security.Cryptography.Aes]::Create()
-        $aes.Key = $keyBytes
-        $aes.IV = $iv
-        $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
-        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
-        
-        $decryptor = $aes.CreateDecryptor()
-        
-        # Decrypt
-        $decryptedBytes = $decryptor.TransformFinalBlock($ciphertext, 0, $ciphertext.Length)
-        $plaintext = [System.Text.Encoding]::UTF8.GetString($decryptedBytes)
-        
-        # Clean up
-        $decryptor.Dispose()
-        $aes.Dispose()
-        
-        return $plaintext
-    }
-    catch {
-        return $null
-    }
 }
 
 function Decrypt-DHData {
@@ -1797,17 +1735,21 @@ if (-not $Child) {
 
     # Handle Ctrl+C gracefully for parent using script scope
     $script:parentShouldStop = $false
+
+    # Path of the PowerShell executable running this script, so restarts keep the same version
+    $script:PowerShellExe = (Get-Process -Id $PID).Path
+    if (-not $script:PowerShellExe) { $script:PowerShellExe = "powershell.exe" }
     Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
         $script:parentShouldStop = $true
     } | Out-Null
 
     do {
 
-        # Start child process with -Child flag, Key parameter, NoTray parameter, and NoEncrypt parameter
-        $keyParam = if ($Key) { " -Key `"$Key`"" } else { "" }
+        # Start child process with -Child flag, NoTray parameter, and NoEncrypt parameter, using the
+        # same PowerShell host as the parent (powershell.exe 5.1 or pwsh.exe 7+)
         $noTrayParam = if ($NoTray) { " -NoTray" } else { "" }
         $noEncryptParam = if ($NoEncrypt) { " -NoEncrypt" } else { "" }
-        $childProcess = Start-Process -FilePath "powershell.exe" -ArgumentList "-File `"$PSCommandPath`" -Port $Port -Child$keyParam$noTrayParam$noEncryptParam" -NoNewWindow -PassThru -Wait
+        $childProcess = Start-Process -FilePath $script:PowerShellExe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Port $Port -Child$noTrayParam$noEncryptParam" -NoNewWindow -PassThru -Wait
 
         if ($childProcess.ExitCode -eq 42) {
             Start-Sleep -Seconds 1
