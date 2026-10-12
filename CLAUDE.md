@@ -12,7 +12,7 @@ NetPaste is a network clipboard and system integration tool that bridges remote 
 - **Server Implementations**: Platform-specific servers for Windows (PowerShell), macOS (Swift), and Linux (Python)
 - **Python Client**: Dual-purpose tool serving as both CLI and MCP server for Claude Code integration
 - **Security Layer**: Diffie-Hellman key exchange with AES-256 encryption and shared secret authentication
-- **Network Discovery**: Automatic IP detection via mosh/syslog for seamless transitions between network connections
+- **Network Discovery**: Automatic IP detection via mosh/syslog for seamless transitions between network connections. Requires mosh-server built with the standard `--enable-syslog` configure option (off by default upstream; Debian's package doesn't enable it), which logs `user X connected from host: IP` for `get_windows_ip()` to find via `journalctl`
 
 ### Key Files
 - `client/netpaste.py` - Main Python client with CLI and MCP server functionality
