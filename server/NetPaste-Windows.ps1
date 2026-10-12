@@ -1681,7 +1681,7 @@ function Convert-UnixToWindowsFilePath {
 function Test-AllowedWindowsPath {
     <#
     .SYNOPSIS
-        Checks a Windows-style path sent by a WSL client (path_style "windows").
+        Checks a Windows-style path sent by a local WSL client (windows_path).
         Allows drive paths (C:\...) and WSL shares (\\wsl.localhost\<distro>\..., \\wsl$\<distro>\...).
         Any other UNC path is refused: opening \\host\share would make Windows authenticate to that host.
     #>
@@ -1691,27 +1691,71 @@ function Test-AllowedWindowsPath {
     return ($Path -match '^[A-Za-z]:\\' -or $Path -match '^\\\\(wsl\.localhost|wsl\$)\\[^\\]+')
 }
 
+function Test-LocalWslClient {
+    <#
+    .SYNOPSIS
+        True if the connection comes from this Windows machine, i.e. a WSL client on this box:
+        loopback or one of this machine's own addresses (WSL mirrored networking), or an address
+        in the subnet of a "vEthernet (WSL...)" adapter (WSL NAT networking).
+        Clients on other machines, including WSL on another box, return false.
+    #>
+    param([string]$RemoteEndpoint)
+
+    $ipText = if ($RemoteEndpoint -match '^\[?(?<ip>.+?)\]?:\d+$') { $Matches['ip'] } else { $RemoteEndpoint }
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($ipText, [ref]$ip)) { return $false }
+    if ($ip.IsIPv4MappedToIPv6) { $ip = $ip.MapToIPv4() }
+    if ([System.Net.IPAddress]::IsLoopback($ip)) { return $true }
+
+    try {
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            $isWslAdapter = $nic.Name -like '*WSL*'
+            foreach ($addr in $nic.GetIPProperties().UnicastAddresses) {
+                if ($addr.Address.Equals($ip)) { return $true }
+                if ($isWslAdapter -and $addr.Address.AddressFamily -eq 'InterNetwork' -and
+                    $ip.AddressFamily -eq 'InterNetwork' -and $addr.IPv4Mask) {
+                    $mask = $addr.IPv4Mask.GetAddressBytes()
+                    $local = $addr.Address.GetAddressBytes()
+                    $remote = $ip.GetAddressBytes()
+                    $sameSubnet = $true
+                    for ($k = 0; $k -lt 4; $k++) {
+                        if (($local[$k] -band $mask[$k]) -ne ($remote[$k] -band $mask[$k])) { $sameSubnet = $false; break }
+                    }
+                    if ($sameSubnet) { return $true }
+                }
+            }
+        }
+    }
+    catch {
+        Write-Warning "Could not enumerate network adapters: $_"
+    }
+    return $false
+}
+
 function Get-ClientWindowsPath {
     <#
     .SYNOPSIS
         Resolves the path in an explorer/open_file/vscode message to a Windows path.
-        WSL clients send Windows paths already (path_style "windows", from wslpath -w);
-        everyone else sends Unix paths that are mapped onto their SSHFS drive.
-        Returns $null if the path is refused.
+        WSL clients also send windows_path (from wslpath -w). It is used only when the client
+        runs on this machine; otherwise the Unix path is mapped onto the client's SSHFS drive
+        as usual. Returns $null if the path is refused.
     #>
     param($MessageData, [string]$RemoteEndpoint, [switch]$Directory)
 
-    if ($MessageData.path_style -eq "windows") {
-        $windowsPath = [string]$MessageData.path
-        if (-not (Test-AllowedWindowsPath -Path $windowsPath)) {
-            Write-Host "Rejected Windows path from $RemoteEndpoint`: $windowsPath" -ForegroundColor Red
-            return $null
+    if ($MessageData.windows_path) {
+        if (Test-LocalWslClient -RemoteEndpoint $RemoteEndpoint) {
+            $windowsPath = [string]$MessageData.windows_path
+            if (-not (Test-AllowedWindowsPath -Path $windowsPath)) {
+                Write-Host "Rejected Windows path from $RemoteEndpoint`: $windowsPath" -ForegroundColor Red
+                return $null
+            }
+            # Explorer needs a directory
+            if ($Directory -and (Test-Path -LiteralPath $windowsPath -PathType Leaf)) {
+                $windowsPath = Split-Path $windowsPath -Parent
+            }
+            return $windowsPath
         }
-        # Explorer needs a directory
-        if ($Directory -and (Test-Path -LiteralPath $windowsPath -PathType Leaf)) {
-            $windowsPath = Split-Path $windowsPath -Parent
-        }
-        return $windowsPath
+        Write-Host "Client $RemoteEndpoint is WSL on another machine; using SSHFS path translation" -ForegroundColor Yellow
     }
 
     if ($Directory) {

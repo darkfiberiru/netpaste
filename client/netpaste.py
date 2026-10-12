@@ -580,25 +580,24 @@ def running_in_wsl():
 def path_message(msg_type, path):
     """Build a path-carrying message (explorer / open_file / vscode).
 
-    Normally the path is sent as a Unix path, and the server maps it onto the
-    SSHFS drive that mounts this box. Inside WSL there is no SSHFS mount: the
-    files are local to Windows, so convert with `wslpath -w` (giving C:\\...
-    for /mnt/c paths, \\\\wsl.localhost\\<distro>\\... otherwise) and mark
-    the path as already Windows-style. NETPASTE_PATH_MODE=unix forces the SSHFS
-    behaviour, e.g. when a WSL client targets a different Windows machine.
+    The path is always sent as a Unix path; the server maps it onto the SSHFS
+    drive that mounts this box. Inside WSL the client also sends the
+    `wslpath -w` form (C:\\... for /mnt/c paths, \\\\wsl.localhost\\<distro>\\...
+    otherwise). The server uses windows_path only when the connection comes from
+    its own machine, so a WSL client talking to a different Windows box falls
+    back to normal SSHFS translation.
     """
     abs_path = os.path.abspath(os.path.expanduser(path)) if path else os.getcwd()
-    mode = os.environ.get('NETPASTE_PATH_MODE', 'auto').lower()
-    if mode != 'unix' and (mode == 'wsl' or running_in_wsl()):
+    message = {"type": msg_type, "path": abs_path}
+    if running_in_wsl():
         try:
             result = subprocess.run(['wslpath', '-w', abs_path],
                                     capture_output=True, text=True, check=True)
-            win_path = result.stdout.strip()
-            if win_path:
-                return json.dumps({"type": msg_type, "path": win_path, "path_style": "windows"})
+            if result.stdout.strip():
+                message["windows_path"] = result.stdout.strip()
         except (OSError, subprocess.CalledProcessError) as e:
-            log(f"wslpath failed for {abs_path}, sending Unix path: {e}")
-    return json.dumps({"type": msg_type, "path": abs_path})
+            log(f"wslpath failed for {abs_path}: {e}")
+    return json.dumps(message)
 
 def paste_text(text, ip=None, port=DEFAULT_PORT):
     """Send text to be pasted to clipboard"""

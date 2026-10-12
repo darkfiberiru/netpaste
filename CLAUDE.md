@@ -118,13 +118,12 @@ Path translation logic:
 - Linux: Parses `/proc/mounts` for FUSE mounts
 - macOS: Scans `/Volumes/` for macFUSE mounts
 - Converts Unix paths (e.g., `/home/user/file`) to local paths (e.g., `F:\home\user\file` on Windows)
-- WSL clients skip SSHFS: `path_message()` in the client runs `wslpath -w` and sends `path_style: "windows"`. The Windows server's `Get-ClientWindowsPath` uses such paths as-is, but only drive paths and `\\wsl.localhost\` / `\\wsl$\` shares (`Test-AllowedWindowsPath`, since other UNC hosts would get NTLM auth). `Open-InVSCode` opens WSL shares with `code --remote wsl+<distro>`
+- WSL clients on the server's own machine skip SSHFS: `path_message()` in the client adds `windows_path` (from `wslpath -w`) next to the Unix `path`. The Windows server's `Get-ClientWindowsPath` uses it only if `Test-LocalWslClient` says the connection is local (loopback, own address, or `vEthernet (WSL*)` subnet); otherwise it falls back to SSHFS translation of `path`, so WSL on another box behaves like any Linux client. It accepts only drive paths and `\\wsl.localhost\` / `\\wsl$\` shares (`Test-AllowedWindowsPath`, since other UNC hosts would get NTLM auth). `Open-InVSCode` opens WSL shares with `code --remote wsl+<distro>`
 
 ## Environment Variables
 
 - `NETPASTE_IP` - Target server IP (auto-detected on Linux if not set, from mosh-server's `user X connected from host: IP` journal line; needs mosh built with `--enable-syslog`, which Debian's package omits)
 - `NETPASTE_PORT` - Target server port (default: 9999)
-- `NETPASTE_PATH_MODE` - `auto` (default; `wslpath` inside WSL), `unix`, or `wsl`
 Pairing storage (protocol v2):
 - Linux client: `~/.config/netpaste/pairings.json` (client_id + one secret per server_id)
 - Windows server: `%APPDATA%\NetPaste\pairings.json` (server_id + one secret per client_id)

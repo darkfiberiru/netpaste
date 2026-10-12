@@ -148,7 +148,7 @@ The macOS Swift server includes a custom BigInt implementation for Diffie-Hellma
 
 #### Platform Support
 - ✅ **Linux** - Full support with auto IP detection via mosh/syslog
-- ⚠️ **WSL** - Untested; no mosh-based IP detection (set `NETPASTE_IP`); paths sent as Windows paths via `wslpath` (no SSHFS needed)
+- ⚠️ **WSL** - Untested; no mosh-based IP detection (set `NETPASTE_IP`); on the server's own machine, Windows paths via `wslpath` are used (no SSHFS); on another box, normal SSHFS translation
 - ⚠️ **macOS** - Untested
 - ⚠️ **Windows (native)** - Untested
 - Installed package / MCP mode requires Python 3.10+ (`mcp` 2.x)
