@@ -22,7 +22,16 @@ This tooling was created to ease the workflow of developers who primarily work o
 ## Architecture
 
 ### Network Discovery
-The system uses a custom mosh setup with syslog enabled (not default on Debian) to automatically detect the IP address of the Windows host. This allows seamless transitions between WiFi, Ethernet, and VPN connections without manual IP configuration. While IPs can be hard-coded, this dynamic approach provides flexibility for mobile development workflows.
+The system uses mosh's connection logging to automatically detect the IP address of the Windows host. This allows seamless transitions between WiFi, Ethernet, and VPN connections without manual IP configuration. While IPs can be hard-coded (`NETPASTE_IP`), this dynamic approach provides flexibility for mobile development workflows.
+
+Syslog support is a standard mosh build option (`./configure --enable-syslog`, in upstream [`configure.ac`](https://github.com/mobile-shell/mosh/blob/master/configure.ac)), not a patch. It is off by default, and Debian's `mosh` package doesn't enable it, so on Debian rebuild mosh-server with the flag. With it, mosh-server logs `user <name> connected from host: <ip>` on each connection. The client finds the newest such line for `$USER` with `journalctl` and uses that IP.
+
+```bash
+sudo apt build-dep mosh
+git clone https://github.com/mobile-shell/mosh && cd mosh
+./autogen.sh && ./configure --enable-syslog && make && sudo make install
+```
+Only mosh-server on the remote box needs the flag; the mosh client on Windows is unchanged. Without it, set `NETPASTE_IP`.
 
 ### File System Access
 NetPaste works in conjunction with SSHFS to mount the remote system's filesystem on the local machine. This enables:
@@ -30,7 +39,7 @@ NetPaste works in conjunction with SSHFS to mount the remote system's filesystem
 - VS Code to access the full project structure
 - File explorer to browse remote directories
 
-All paths are automatically translated from Unix format to Windows paths (using F: drive as the mount point by default).
+All paths are automatically translated from Unix format to Windows paths (using F: drive as the mount point by default). See [Related Tools](#related-tools-windows-server) for setting up the mount with SSHFS-Win Manager.
 
 ## Platform Support
 
@@ -268,12 +277,13 @@ updated to v2 yet.
 - Python 3.10+ when installed as a package (`pip`/`uv`), which is required by `mcp` 2.x
 - No external dependencies for core CLI functionality
 - Optional: netcat (nc) for auto IP detection from mosh (Linux only)
+- Optional: mosh-server built with `--enable-syslog` on the remote box, for auto IP detection (see [Network Discovery](#network-discovery))
 - Optional: MCP support requires `pip install 'mcp[cli]>=2.3,<3'`
 
 ## Remote Development Workflow
 
 1. **Connect to remote box**: Use mosh for persistent sessions
-2. **Mount filesystem**: Use SSHFS to mount remote filesystem on Windows (typically as F: drive)
+2. **Mount filesystem**: Use SSHFS to mount the remote filesystem's root on Windows, typically as F: (see [Related Tools](#related-tools-windows-server))
 3. **Start NetPaste**: Run PowerShell server on Windows
 4. **Work remotely**: Use shell aliases to seamlessly interact with local desktop
 
@@ -283,6 +293,72 @@ This setup provides a fluid development experience where you can:
 - Browse remote files with local file explorer
 - Receive desktop notifications from remote processes
 - All while maintaining secure, encrypted communication
+
+## Related Tools (Windows server)
+
+NetPaste sends Unix paths (for example `/home/user/project`), and the Windows
+server opens them through an SSHFS mount of the remote box. Without that
+mount, `npd`, `npo`, `npcode` and the matching MCP tools can't find the
+files. Clipboard, notifications, URLs, `npget` and `npgetfile` work without it.
+
+The recommended setup is [SSHFS-Win Manager](https://github.com/evsar3/sshfs-win-manager),
+a tray app for SSHFS-Win. It needs two other packages first, installed in this order.
+
+### 1. Install the dependencies
+
+| Order | Package | What it is | Install |
+|---|---|---|---|
+| 1 | [WinFsp](https://github.com/winfsp/winfsp) | FUSE for Windows (Windows 7–11, x86/x64/ARM64) | Installer from the [latest release](https://github.com/winfsp/winfsp/releases/latest), or `choco install winfsp`. The default components are enough; the "Developer" option is only needed to build file systems. |
+| 2 | [SSHFS-Win](https://github.com/winfsp/sshfs-win) | Port of [SSHFS](https://github.com/libfuse/sshfs) to WinFsp/Cygwin | `winget install SSHFS-Win.SSHFS-Win`, or the x64/x86 MSI from the [releases page](https://github.com/winfsp/sshfs-win/releases) |
+| 3 | [SSHFS-Win Manager](https://github.com/evsar3/sshfs-win-manager) | GUI that manages SSHFS-Win connections from the tray | Installer from the [latest release](https://github.com/evsar3/sshfs-win-manager/releases/latest) |
+
+Or install the first two from PowerShell, then install SSHFS-Win Manager from its release page:
+```powershell
+choco install winfsp
+winget install SSHFS-Win.SSHFS-Win
+```
+
+### 2. Configure a connection in SSHFS-Win Manager
+
+The server matches a mount to a client by **exact IP address**, and it maps
+`/some/path` to `<drive>:\some\path`. Configure the connection to fit both rules:
+
+**Basic** tab:
+
+| Field | Value | Why |
+|---|---|---|
+| IP/Host | The remote box's **IP address**, the same address NetPaste connections come from (not a hostname) | The server compares the mount's host with the client's source IP. If they differ, it falls back to `F:` |
+| Port / User | Your SSH port and user on the remote box | |
+| Authentication method | **Key file**, using a key without a passphrase | SSHFS-Win can't prompt for a key passphrase. Passwords are stored in plain JSON ([issue #28](https://github.com/evsar3/sshfs-win-manager/issues/28)) |
+| Path | `/` (the root of the remote filesystem) | Paths are translated as `/home/user/x` → `F:\home\user\x`, so the drive must show the remote root, not your home directory |
+| Drive letter | `F:` (or any free letter, or Auto) | Any letter works. The server reads it from the running `sshfs.exe` command line, and `F:` is the fallback |
+
+**Advanced** tab: turn on **Connect on Startup** and **Try to Reconnect on
+Connection Loss**. In the app settings, turn on starting with Windows. Use the
+connection debug log if a mount fails.
+
+> SSHFS-Win Manager runs `sshfs.exe` with `StrictHostKeyChecking=no` and
+> `UserKnownHostsFile=/dev/null`, so it does not verify the remote host key.
+> Use it only on networks you trust, the same as NetPaste itself.
+
+### 3. Check that NetPaste sees the mount
+
+From the remote box, run `npd ~`. The server console should print
+`Found SSHFS mount for <ip> on drive <X:>`, and Explorer should open your home
+directory. `No SSHFS mount found for <ip>, defaulting to F:` means the
+connection's host doesn't match the client's IP. Detection is cached for
+5 minutes, so restart the server (`npr`) after you change the mount.
+
+### Without the manager
+
+A plain SSHFS-Win mapping also works when it is a root-relative mapping
+(`\\sshfs.r\` for passwords, `\\sshfs.kr\` for keys from `%USERPROFILE%\.ssh\id_rsa`):
+```powershell
+net use F: \\sshfs.kr\user@192.168.1.50
+```
+The server detects these mappings from `net use` on any drive letter. A
+home-relative mapping (`\\sshfs\`, `\\sshfs.k\`) is detected too, but its paths
+won't line up, because the drive shows your home directory instead of `/`.
 
 ## Network Configuration
 

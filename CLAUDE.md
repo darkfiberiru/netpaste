@@ -121,7 +121,7 @@ Path translation logic:
 
 ## Environment Variables
 
-- `NETPASTE_IP` - Target server IP (auto-detected from mosh/syslog on Linux if not set)
+- `NETPASTE_IP` - Target server IP (auto-detected on Linux if not set, from mosh-server's `user X connected from host: IP` journal line; needs mosh built with `--enable-syslog`, which Debian's package omits)
 - `NETPASTE_PORT` - Target server port (default: 9999)
 Pairing storage (protocol v2):
 - Linux/WSL client: `~/.config/netpaste/pairings.json` (client_id + one secret per server_id)

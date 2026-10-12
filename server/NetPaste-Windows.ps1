@@ -1555,8 +1555,9 @@ function Find-SshfsMount {
     try {
         $netUseOutput = net use
         foreach ($line in $netUseOutput) {
-            # Regex to find a drive letter and a UNC path starting with \\sshfs\
-            if ($line -match '([A-Z]:)\s+\\\\sshfs\\(?<user>[^@]+)@(?<host>[\d\.\w\-]+)') {
+            # Regex to find a drive letter and an SSHFS-Win UNC path: \\sshfs\ (home-relative),
+            # \\sshfs.r\ (root-relative), and the key-auth variants \\sshfs.k\ and \\sshfs.kr\
+            if ($line -match '([A-Z]:)\s+\\\\sshfs(?:\.(?:kr|k|r))?\\(?<user>[^@\\]+)@(?<host>[\d\.\w\-]+)') {
                 $mounts += [PSCustomObject]@{
                     DriveLetter = $Matches[1]
                     IPAddress   = $Matches['host']
