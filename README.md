@@ -349,7 +349,7 @@ for Claude Code). The **Windows desktop** runs the server.
 | Everything | Execution policy that allows the script; an inbound firewall rule if connections are blocked (see [Windows Server](#windows-server-powershell)) |
 | `npd`, `npo`, `npcode` on remote files | WinFsp, SSHFS-Win, SSHFS-Win Manager (see [Related Tools](#related-tools-windows-server)) |
 | `npcode` | [VS Code](https://code.visualstudio.com/) with `code` on the PATH (the installer's "Add to PATH" option, on by default). It opens the folder over the SSHFS drive, which works but is slow on large repos |
-| Connecting to the remote box | A mosh client: e.g. `mosh` inside WSL, Cygwin's `mosh` package, or [MobaXterm](https://mobaxterm.mobatek.net/) (built-in mosh). OpenSSH (built into Windows 10+) for the SSHFS key setup |
+| Connecting to the remote box | A mosh client: e.g. `mosh` inside WSL, Cygwin's `mosh` package, or [MobaXterm](https://mobaxterm.mobatek.net/) (built-in mosh). OpenSSH (built into Windows 10+) if you use a key for SSHFS |
 
 ### Other servers (untested, protocol v1 only)
 
@@ -416,11 +416,11 @@ The server matches a mount to a client by **exact IP address**, and it maps
 |---|---|---|
 | IP/Host | The remote box's **IP address**, the same address NetPaste connections come from (not a hostname) | The server compares the mount's host with the client's source IP. If they differ, it falls back to `F:` |
 | Port / User | Your SSH port and user on the remote box | |
-| Authentication method | **Key file**, using a key without a passphrase | SSHFS-Win can't prompt for a key passphrase. Passwords are stored in plain JSON ([issue #28](https://github.com/evsar3/sshfs-win-manager/issues/28)) |
+| Authentication method | **Password**, **Password (ask on connect)** or **Key file**: any works | NetPaste doesn't care how the mount authenticates. Saved passwords are stored in plain JSON ([issue #28](https://github.com/evsar3/sshfs-win-manager/issues/28)). Keys must have no passphrase, because SSHFS-Win can't prompt for one |
 | Path | `/` (the root of the remote filesystem) | Paths are translated as `/home/user/x` → `F:\home\user\x`, so the drive must show the remote root, not your home directory |
 | Drive letter | `F:` (or any free letter, or Auto) | Any letter works. The server reads it from the running `sshfs.exe` command line, and `F:` is the fallback |
 
-**SSH key for the mount.** Create a dedicated key on Windows with no
+**Optional: SSH key for the mount.** If you'd rather not use a password, create a dedicated key on Windows with no
 passphrase, and authorize it on the remote box. Since it's stored unencrypted,
 don't reuse your main key:
 ```powershell
